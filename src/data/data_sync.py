@@ -344,6 +344,55 @@ class DataSynchronizer:
                        details=f'股票 {stock_records}, 指数 {index_records}, 停牌 {suspended_count}')
         return result
 
+    def sync_index_data(self, start_date: str, end_date: str = '', progress_callback=None) -> int:
+        """
+        单独同步指数日K线数据
+
+        Parameters
+        ----------
+        start_date : str
+            起始日期，格式 YYYYMMDD
+        end_date : str
+            结束日期，格式 YYYYMMDD，默认为空表示最新
+        progress_callback : callable, optional
+            进度回调函数
+
+        Returns
+        -------
+        int
+            同步的指数记录数
+        """
+        start_time = datetime.now()
+        logger.info(f"开始同步指数数据: {start_date} -> {end_date or '最新'}")
+
+        # 获取指数列表
+        index_codes = self.qmt.get_index_list()
+        if not index_codes:
+            logger.warning("指数列表为空")
+            return 0
+
+        logger.info(f"获取到 {len(index_codes)} 个指数")
+
+        # 先下载指数历史数据
+        logger.info(f"开始下载 {len(index_codes)} 个指数的历史数据...")
+        try:
+            self.qmt.download_history_data(index_codes, period='1d',
+                                          start_time=start_date, end_time=end_date)
+        except Exception as e:
+            logger.warning(f"批量下载指数历史数据失败: {e}")
+        logger.info("指数历史数据下载完成")
+
+        # 同步指数数据
+        index_records = self._sync_index_daily(
+            index_codes, start_date, end_date, progress_callback
+        )
+
+        logger.info(f"指数数据同步完成: {index_records} 条, {len(index_codes)} 个指数")
+        self._log_sync('index_daily', start_time, datetime.now(),
+                       index_records, 'success',
+                       details=f'指数 {index_records} 条, {len(index_codes)} 个')
+        return index_records
+
     def sync_sector_data(self) -> dict:
         """
         同步板块数据和成分股，以及指数成分股权重
@@ -391,6 +440,14 @@ class DataSynchronizer:
             today_str = datetime.now().strftime('%Y-%m-%d')
             index_constituent_rows = []
 
+            # 先下载指数权重数据
+            try:
+                logger.info(f"开始下载指数权重数据...")
+                self.qmt.download_index_weight(list(self.KNOWN_INDEX_CODES))
+                logger.info("指数权重数据下载完成")
+            except Exception as e:
+                logger.warning(f"下载指数权重数据失败: {e}")
+
             for index_code in self.KNOWN_INDEX_CODES:
                 try:
                     weight_data = self.qmt.get_index_weight(index_code)
@@ -411,6 +468,7 @@ class DataSynchronizer:
             if index_constituent_rows:
                 index_df = pd.DataFrame(index_constituent_rows)
                 self.db.insert_index_constituent(index_df)
+                logger.info(f"写入指数成分股权重: {len(index_constituent_rows)} 条")
 
             result = {
                 'sector_count': sector_count,
@@ -466,54 +524,70 @@ class DataSynchronizer:
         # QMT财务报表类型
         table_list = ['Balance', 'Income', 'CashFlow']
 
-        try:
-            # 批量获取财务数据
-            financial_data = self.qmt.get_financial_data(
-                stock_codes, table_list, start_date, end_date
-            )
+        # 分批处理，每批100只股票
+        batch_size = 100
+        batch_count = (total + batch_size - 1) // batch_size
 
-            if financial_data:
-                # QMT get_financial_data 返回格式:
-                # { stock_code: { table_name: DataFrame } }
-                # 需要遍历每只股票、每张报表，转换为写入格式
-                all_financial_rows = []
+        logger.info(f"财务数据分批处理: {total}只股票, {batch_count}批, 每批{batch_size}只")
 
-                for stock_code, stock_tables in financial_data.items():
-                    if not isinstance(stock_tables, dict):
-                        continue
-                    for table_name, table_df in stock_tables.items():
-                        if table_df is None or table_df.empty:
+        for batch_idx in range(batch_count):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, total)
+            batch_codes = stock_codes[batch_start:batch_end]
+
+            try:
+                logger.info(f"处理第 {batch_idx + 1}/{batch_count} 批: {len(batch_codes)}只股票")
+
+                # 1. 下载本批财务数据
+                try:
+                    self.qmt.download_financial_data(
+                        batch_codes, table_list, start_date, end_date
+                    )
+                except Exception as e:
+                    logger.warning(f"第 {batch_idx + 1} 批下载失败: {e}")
+                    error_count += len(batch_codes)
+                    continue
+
+                # 2. 获取本批财务数据
+                financial_data = self.qmt.get_financial_data(
+                    batch_codes, table_list, start_date, end_date
+                )
+
+                if financial_data:
+                    # 3. 转换并写入本批数据
+                    batch_rows = []
+                    for stock_code, stock_tables in financial_data.items():
+                        if not isinstance(stock_tables, dict):
                             continue
-                        # table_df 的索引是报告期，列是各财务字段
-                        for report_date, row in table_df.iterrows():
-                            # 将该行所有字段存为JSON
-                            row_data = row.to_dict()
-                            # 清理NaN值
-                            row_data = {
-                                k: (None if (isinstance(v, float) and pd.isna(v)) else v)
-                                for k, v in row_data.items()
-                            }
-                            all_financial_rows.append({
-                                'stock_code': stock_code,
-                                'report_date': str(report_date),
-                                'table_name': table_name,
-                                'data_json': row_data,
-                            })
+                        for table_name, table_df in stock_tables.items():
+                            if table_df is None or table_df.empty:
+                                continue
+                            for report_date, row in table_df.iterrows():
+                                row_data = row.to_dict()
+                                row_data = {
+                                    k: (None if (isinstance(v, float) and pd.isna(v)) else v)
+                                    for k, v in row_data.items()
+                                }
+                                batch_rows.append({
+                                    'stock_code': stock_code,
+                                    'report_date': str(report_date),
+                                    'table_name': table_name,
+                                    'data_json': row_data,
+                                })
 
-                if all_financial_rows:
-                    financial_df = pd.DataFrame(all_financial_rows)
-                    self.db.insert_financial_data(financial_df)
-                    record_count = len(all_financial_rows)
+                    if batch_rows:
+                        financial_df = pd.DataFrame(batch_rows)
+                        self.db.insert_financial_data(financial_df)
+                        record_count += len(batch_rows)
+                        logger.info(f"第 {batch_idx + 1} 批写入 {len(batch_rows)} 条记录")
 
-        except Exception as e:
-            logger.error(f"获取财务数据失败: {e}", exc_info=True)
-            error_count = total
-            self._log_sync('financial_data', start_time, datetime.now(), 0, 'failed',
-                           error_message=str(e))
+                if progress_callback:
+                    progress_callback('financial_data', batch_end, total,
+                                      f'财务数据: {batch_end}/{total}')
 
-        if progress_callback and total > 0:
-            progress_callback('financial_data', total, total,
-                              f'财务数据: {total}/{total}')
+            except Exception as e:
+                logger.error(f"第 {batch_idx + 1} 批处理失败: {e}")
+                error_count += len(batch_codes)
 
         result = {
             'record_count': record_count,

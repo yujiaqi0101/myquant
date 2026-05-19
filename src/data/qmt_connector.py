@@ -25,6 +25,8 @@ try:
         get_trading_dates,
         get_index_weight,
         get_financial_data,
+        download_financial_data2,
+        download_index_weight,
     )
     _XTQUANT_AVAILABLE = True
     logger.info("xtquant 导入成功")
@@ -381,6 +383,39 @@ class QMTConnector:
             logger.error(f"获取板块股票列表失败 [{sector_name}]: {e}")
             raise
 
+    def get_index_list(self) -> list:
+        """
+        获取所有指数代码列表
+
+        通过 '沪深指数', '沪市指数', '深市指数' 等板块获取指数列表
+
+        Returns
+        -------
+        list
+            指数代码列表
+        """
+        if not _XTQUANT_AVAILABLE:
+            raise ImportError("xtquant 未安装，请先安装 xtquant 库")
+
+        try:
+            index_codes = set()
+            index_sectors = ['沪深指数', '沪市指数', '深市指数']
+
+            for sector in index_sectors:
+                try:
+                    codes = get_stock_list_in_sector(sector)
+                    if codes:
+                        index_codes.update(codes)
+                except Exception:
+                    pass
+
+            result = list(index_codes)
+            logger.info(f"获取指数列表: {len(result)} 个")
+            return result
+        except Exception as e:
+            logger.error(f"获取指数列表失败: {e}")
+            raise
+
     def get_sector_list(self) -> list:
         """
         获取所有板块列表
@@ -399,6 +434,28 @@ class QMTConnector:
             return sectors if sectors is not None else []
         except Exception as e:
             logger.error(f"获取板块列表失败: {e}")
+            raise
+
+    def download_index_weight(self, index_codes: list):
+        """
+        下载指数成分股权重数据
+
+        必须先下载才能通过 get_index_weight 获取
+
+        Parameters
+        ----------
+        index_codes : list of str
+            指数代码列表
+        """
+        if not _XTQUANT_AVAILABLE:
+            raise ImportError("xtquant 未安装，请先安装 xtquant 库")
+
+        try:
+            logger.info(f"开始下载指数权重数据: {len(index_codes)} 个指数")
+            download_index_weight()
+            logger.info("指数权重数据下载完成")
+        except Exception as e:
+            logger.error(f"下载指数权重数据失败: {e}")
             raise
 
     def get_index_weight(self, index_code: str) -> dict:
@@ -424,6 +481,37 @@ class QMTConnector:
             return weight if weight is not None else {}
         except Exception as e:
             logger.error(f"获取指数权重失败 [{index_code}]: {e}")
+            raise
+
+    def download_financial_data(self, stock_list, table_list, start_time='', end_time=''):
+        """
+        下载财务数据到本地
+
+        财务数据必须先下载才能通过 get_financial_data 获取
+
+        Parameters
+        ----------
+        stock_list : list of str
+            股票代码列表
+        table_list : list of str
+            财务报表名称列表，如 ['Balance', 'Income', 'CashFlow']
+        start_time : str
+            开始时间
+        end_time : str
+            结束时间
+        """
+        if not _XTQUANT_AVAILABLE:
+            raise ImportError("xtquant 未安装，请先安装 xtquant 库")
+
+        try:
+            logger.info(
+                f"开始下载财务数据: {len(stock_list)}只股票, "
+                f"报表={table_list}, 起始={start_time}, 结束={end_time}"
+            )
+            download_financial_data2(stock_list, table_list, start_time, end_time)
+            logger.info("财务数据下载完成")
+        except Exception as e:
+            logger.error(f"下载财务数据失败: {e}")
             raise
 
     def get_financial_data(
