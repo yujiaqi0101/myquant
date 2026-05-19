@@ -95,6 +95,12 @@
 - 自动更新最佳指标记录
 - 便于快速找到历史最优参数组合
 
+### 📋 运行日志系统
+- **控制台输出**：带颜色的实时日志（INFO绿色、WARNING黄色、ERROR红色）
+- **文件记录**：按天轮转，保留30天，存储在 `logs/aquant_YYYYMMDD.log`
+- **日志级别**：支持 DEBUG/INFO/WARNING/ERROR 四级
+- **命令行控制**：`--log-level` 设置级别，`--no-log-file` 仅控制台输出
+
 ### 🔀 测试数据与真实数据分离
 - **测试数据**：存储在 `data/test_data/` 目录的CSV文件中，不写入数据库
 - **真实数据**：存储在SQLite数据库中，通过QMT同步或手动导入
@@ -106,13 +112,16 @@
 ```
 aquant/
 ├── config/                 # 配置文件
-│   └── config.py
+│   ├── config.py          # 主配置文件
+│   └── credentials.json   # 敏感信息（账号密码等）
 ├── data/                   # 数据目录
 │   ├── aquant.db          # SQLite数据库（存储真实数据）
 │   └── test_data/         # 测试数据目录（CSV文件）
 │       ├── stock_info.csv  # 股票信息
 │       ├── stock_daily.csv # 股票日频数据
 │       └── index_daily.csv # 指数日频数据
+├── logs/                   # 日志目录
+│   └── aquant_YYYYMMDD.log # 运行日志（保留30天）
 ├── src/                    # 源代码
 │   ├── data/              # 数据模块
 │   │   ├── adapter.py     # 数据适配器
@@ -161,6 +170,8 @@ aquant/
 │   │   │   └── fair_value_estimator.py
 │   │   └── sentiment/     # 情感分析接口
 │   │       └── news_sentiment.py
+│   ├── utils/             # 工具模块
+│   │   └── logger.py      # 日志工具
 │   └── visualization/     # 可视化模块
 │       └── dashboard.py   # Streamlit仪表盘
 ├── tests/                  # 测试文件
@@ -283,6 +294,8 @@ streamlit run src/visualization/dashboard.py
 | `--password` | QMT交易密码 | - |
 | `--n-stocks` | 测试数据股票数量 | 100 |
 | `--n-days` | 测试数据天数 | 250 |
+| `--log-level` | 日志级别 (DEBUG/INFO/WARNING/ERROR) | INFO |
+| `--no-log-file` | 禁用日志文件输出（仅控制台） | False |
 
 ## 数据模式说明
 
@@ -325,11 +338,30 @@ streamlit run src/visualization/dashboard.py
 
 ### 配置说明
 
-在 `config/config.py` 中配置，或通过环境变量：
+在 `config/credentials.json` 中配置QMT账号、密码和路径：
+
+```json
+{
+    "qmt": {
+        "account": "your_account",
+        "password": "your_password",
+        "path": "E:\\国金QMT交易端模拟\\userdata_mini"
+    }
+}
+```
+
+或通过环境变量配置：
 
 ```bash
+# Linux/Mac
 export QMT_ACCOUNT=your_account
 export QMT_PASSWORD=your_password
+export QMT_PATH="E:\\国金QMT交易端模拟\\userdata_mini"
+
+# Windows
+set QMT_ACCOUNT=your_account
+set QMT_PASSWORD=your_password
+set QMT_PATH=E:\国金QMT交易端模拟\userdata_mini
 ```
 
 ### 数据同步流程

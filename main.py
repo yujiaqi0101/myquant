@@ -32,6 +32,7 @@ from src.analysis import MarketStageDetector, SimilarityAnalyzer
 from src.risk import RiskManager
 from src.enhancement import IndexEnhancementAnalyzer, IndexConstituentGenerator
 from src.valuation import ValuationAnalyzer
+from src.utils.logger import setup_logger, get_log_files
 
 # 导入配置
 from config.config import (
@@ -522,6 +523,11 @@ def main():
     parser.add_argument('--password', default='', help='QMT交易密码（默认从config/credentials.json读取）')
     parser.add_argument('--n-stocks', type=int, default=100, help='测试数据股票数量')
     parser.add_argument('--n-days', type=int, default=250, help='测试数据天数')
+    parser.add_argument('--log-level', default='INFO',
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+                        help='日志级别 (默认INFO)')
+    parser.add_argument('--no-log-file', action='store_true',
+                        help='禁用日志文件输出（仅控制台）')
 
     # 因子注册表相关参数
     parser.add_argument('--list-factors', action='store_true', help='列出所有系统因子')
@@ -534,7 +540,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 优先使用命令行参数设置数据模式
+    # 数据模式设置
     if args.source == 'test':
         from config import config as config_module
         config_module.DATA_MODE_CONFIG["mode"] = 'test'
@@ -542,7 +548,6 @@ def main():
         from config import config as config_module
         config_module.DATA_MODE_CONFIG["mode"] = 'real'
 
-    # 打印数据模式
     current_mode = get_data_mode()
     mode_display = {
         'test': '测试模式 (优先数据库,可回退模拟数据)',
@@ -550,11 +555,23 @@ def main():
         'auto': '自动检测 (默认,行为同测试模式)',
     }
 
-    print("=" * 60)
-    print("A股量化分析系统 v0.4.1 (数据分离版)")
-    print("=" * 60)
-    print(f"数据模式: {mode_display.get(current_mode, current_mode)}")
-    print("=" * 60)
+    # 初始化日志
+    import logging
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    logger = setup_logger(
+        level=log_level,
+        console=True,
+        log_file=None if args.no_log_file else 'aquant.log'
+    )
+    logger.info("=" * 60)
+    logger.info("A股量化分析系统 v0.4.1 (数据分离版)")
+    logger.info("=" * 60)
+    logger.info(f"数据模式: {mode_display.get(current_mode, current_mode)}")
+    logger.info(f"日志级别: {args.log_level}")
+    if not args.no_log_file:
+        from src.utils.logger import LOG_DIR
+        logger.info(f"日志文件: {LOG_DIR}/aquant_*.log")
+    logger.info("=" * 60)
 
     # 数据库路径
     db_path = str(project_root / DATABASE_CONFIG["path"])

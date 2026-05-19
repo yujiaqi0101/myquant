@@ -563,7 +563,15 @@ class DatabaseManager:
 
         df = df.copy()
         if 'list_date' in df.columns:
-            df['list_date'] = pd.to_datetime(df['list_date']).dt.strftime('%Y-%m-%d')
+            # 处理无效日期（如空值、0000-00-00等）
+            def safe_parse_date(x):
+                if pd.isna(x) or x == '' or x == '0000-00-00' or str(x).startswith('0000'):
+                    return None
+                try:
+                    return pd.to_datetime(x).strftime('%Y-%m-%d')
+                except (ValueError, pd.errors.OutOfBoundsDatetime):
+                    return None
+            df['list_date'] = df['list_date'].apply(safe_parse_date)
 
         for col in ['stock_name', 'industry', 'market_cap', 'list_date']:
             if col not in df.columns:

@@ -71,7 +71,8 @@ def get_credentials(service: str = 'qmt') -> dict:
         # 环境变量优先
         account = os.environ.get("QMT_ACCOUNT", creds.get("account", ""))
         password = os.environ.get("QMT_PASSWORD", creds.get("password", ""))
-        return {"account": account, "password": password}
+        qmt_path = os.environ.get("QMT_PATH", creds.get("path", ""))
+        return {"account": account, "password": password, "path": qmt_path}
 
     return creds
 
@@ -171,6 +172,7 @@ QMT_CONFIG = {
     "enabled": False,              # 是否启用QMT数据源
     "account": _QMT_CREDS.get("account", ""),  # 从credentials.json或环境变量读取
     "password": _QMT_CREDS.get("password", ""),  # 从credentials.json或环境变量读取
+    "path": _QMT_CREDS.get("path", ""),  # QMT安装目录下userdata_mini路径
     "default_start_date": "20230101",  # 默认数据起始日期
     "data_types": ["stock", "index", "etf", "fund"],  # 要同步的数据类型
     "sync_on_startup": False,      # 启动时是否自动同步

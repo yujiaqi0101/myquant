@@ -6,6 +6,8 @@ QMT接口连接器模块
 """
 
 import logging
+import random
+import time
 from typing import List, Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,8 @@ class QMTConnector:
     当 xtquant 未安装时，所有方法会抛出 ImportError。
     """
 
-    def __init__(self, account: Optional[str] = None, password: Optional[str] = None):
+    def __init__(self, account: Optional[str] = None, password: Optional[str] = None,
+                 qmt_path: Optional[str] = None):
         """
         初始化QMT连接器
 
@@ -52,15 +55,28 @@ class QMTConnector:
             QMT交易账号
         password : str, optional
             QMT交易密码
+        qmt_path : str, optional
+            QMT安装目录下userdata_mini路径，如未指定则从配置文件读取
         """
-        self.account = account
-        self.password = password
+        # 优先使用传入参数，否则从配置读取
+        from config.config import get_credentials
+        creds = get_credentials('qmt')
+        self.account = account or creds.get('account', '')
+        self.password = password or creds.get('password', '')
+        self.qmt_path = qmt_path or creds.get('path', '')
         self._client = None
         self._connected = False
 
-    def connect(self) -> bool:
+    def connect(self, max_retries: int = 3, data_only: bool = True) -> bool:
         """
         连接QMT交易系统
+
+        Parameters
+        ----------
+        max_retries : int
+            最大重试次数
+        data_only : bool
+            是否仅使用数据接口（不使用交易接口XtQuantTrader）
 
         Returns
         -------
@@ -71,28 +87,56 @@ class QMTConnector:
             logger.error("xtquant 未安装，无法连接QMT")
             raise ImportError("xtquant 未安装，请先安装 xtquant 库")
 
-        try:
-            self._client = xttrader.XtQuantTrader(
-                path="", session_id=0
-            )
-            if self.account:
-                self._client.start()
-                result = self._client.connect()
-                if result == 0:
+        # 数据模式：只使用xtdata，不使用XtQuantTrader
+        if data_only:
+            try:
+                # xtdata会自动连接，无需手动调用connect
+                # 通过获取股票列表来测试连接
+                test_stocks = get_stock_list_in_sector('沪深A股')
+                if test_stocks and len(test_stocks) > 0:
                     self._connected = True
-                    logger.info(f"QMT连接成功，账号: {self.account}")
+                    logger.info(f"QMT数据接口连接成功，获取到 {len(test_stocks)} 只股票")
+                    return True
                 else:
-                    self._connected = False
-                    logger.error(f"QMT连接失败，返回码: {result}")
-            else:
-                # 无账号时仅标记为已初始化（可用于数据查询）
-                self._connected = True
-                logger.info("QMT已初始化（无交易账号，仅数据模式）")
-            return self._connected
-        except Exception as e:
-            self._connected = False
-            logger.error(f"QMT连接异常: {e}")
-            raise
+                    logger.error("QMT数据接口连接失败：无法获取股票列表")
+                    return False
+            except Exception as e:
+                logger.error(f"QMT数据接口连接异常: {e}")
+                return False
+
+        # 交易模式：使用XtQuantTrader（需要QMT软件配合）
+        for attempt in range(max_retries):
+            try:
+                # 使用随机session ID避免冲突
+                session_id = random.randint(100000, 999999)
+                self._client = xttrader.XtQuantTrader(
+                    path=self.qmt_path, session=session_id
+                )
+                if self.account:
+                    self._client.start()
+                    result = self._client.connect()
+                    if result == 0:
+                        self._connected = True
+                        logger.info(f"QMT连接成功，账号: {self.account}, session: {session_id}")
+                        return True
+                    else:
+                        self._connected = False
+                        logger.warning(f"QMT连接失败，返回码: {result}，尝试 {attempt + 1}/{max_retries}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2)
+                else:
+                    # 无账号时仅标记为已初始化（可用于数据查询）
+                    self._connected = True
+                    logger.info("QMT已初始化（无交易账号，仅数据模式）")
+                    return True
+            except Exception as e:
+                self._connected = False
+                logger.error(f"QMT连接异常: {e}，尝试 {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+        logger.error(f"QMT连接失败，已重试 {max_retries} 次")
+        return False
 
     def disconnect(self):
         """断开QMT连接"""
@@ -156,12 +200,12 @@ class QMTConnector:
             raise ImportError("xtquant 未安装，请先安装 xtquant 库")
 
         try:
-            logger.info(
-                f"开始下载历史数据: {len(stock_list)}只股票, "
-                f"周期={period}, 起始={start_time}, 结束={end_time}"
-            )
-            download_history_data(stock_list, period, start_time, end_time)
-            logger.info("历史数据下载完成")
+            # download_history_data 只接受单只股票，需要逐个下载
+            for i, stock_code in enumerate(stock_list):
+                if i % 100 == 0:
+                    logger.info(f"下载历史数据进度: {i}/{len(stock_list)}")
+                download_history_data(stock_code, period, start_time, end_time)
+            logger.info(f"历史数据下载完成，共 {len(stock_list)} 只股票")
         except Exception as e:
             logger.error(f"下载历史数据失败: {e}")
             raise
@@ -260,6 +304,7 @@ class QMTConnector:
         end_time: str = '',
         count: int = -1,
         dividend_type: str = 'front',
+        field_list: List[str] = None,
     ) -> dict:
         """
         获取市场K线数据（扩展版）
@@ -278,6 +323,8 @@ class QMTConnector:
             获取数量，-1表示全部
         dividend_type : str
             复权类型: 'front'前复权, 'back'后复权, 'none'不复权
+        field_list : list of str, optional
+            字段列表，如 ['time', 'open', 'high', 'low', 'close', 'volume', 'amount']
 
         Returns
         -------
@@ -292,9 +339,17 @@ class QMTConnector:
                 f"获取市场数据: {len(stock_list)}只股票, "
                 f"周期={period}, 复权={dividend_type}"
             )
+            # 默认字段列表
+            if field_list is None:
+                field_list = ['time', 'open', 'high', 'low', 'close', 'volume', 'amount', 'preClose', 'suspendFlag']
             data = get_market_data_ex(
-                stock_list, period, start_time, end_time,
-                count=count, dividend_type=dividend_type,
+                field_list=field_list,
+                stock_list=stock_list,
+                period=period,
+                start_time=start_time,
+                end_time=end_time,
+                count=count,
+                dividend_type=dividend_type,
             )
             return data if data is not None else {}
         except Exception as e:

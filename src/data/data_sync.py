@@ -533,7 +533,7 @@ class DataSynchronizer:
         """
         批量同步股票日K线数据
 
-        使用 get_market_data_ex 批量获取，transform_market_data 转换，
+        先下载历史数据，再使用 get_market_data_ex 批量获取，transform_market_data 转换，
         计算 VWAP，填充停牌数据，写入 stock_daily 表。
 
         Returns
@@ -545,6 +545,14 @@ class DataSynchronizer:
         suspended_count = 0
         batch_size = 100  # 每批100只股票
         total_stocks = len(stock_codes)
+
+        # 先下载所有股票的历史数据
+        logger.info(f"开始下载 {total_stocks} 只股票的历史数据...")
+        try:
+            self.qmt.download_history_data(stock_codes, period='1d', start_time=start_date, end_time=end_date)
+        except Exception as e:
+            logger.warning(f"批量下载历史数据失败: {e}")
+        logger.info("历史数据下载完成")
 
         for batch_start in range(0, total_stocks, batch_size):
             batch_codes = stock_codes[batch_start:batch_start + batch_size]
@@ -587,11 +595,13 @@ class DataSynchronizer:
                         df.loc[mask, 'vwap'] = df.loc[mask, 'pre_close']
 
                 # 填充停牌数据
+                filled_frames = []
                 for code in df['stock_code'].unique():
-                    code_mask = df['stock_code'] == code
-                    code_df = df.loc[code_mask].copy()
+                    code_df = df.loc[df['stock_code'] == code].copy()
                     code_df = self._fill_suspended_data(code_df, code)
-                    df.loc[code_mask, code_df.columns] = code_df.values
+                    filled_frames.append(code_df)
+                if filled_frames:
+                    df = pd.concat(filled_frames, ignore_index=True)
 
                 # 统计停牌数
                 if 'suspend_flag' in df.columns:
@@ -602,7 +612,7 @@ class DataSynchronizer:
                 stock_records += len(df)
 
             except Exception as e:
-                logger.debug(f"获取股票行情批次失败 [{batch_start}:{batch_end}]: {e}")
+                logger.warning(f"获取股票行情批次失败 [{batch_start}:{batch_end}]: {e}", exc_info=True)
 
             # 进度回调（股票部分占70%）
             if progress_callback and total_stocks > 0:
@@ -753,8 +763,12 @@ class DataSynchronizer:
         df.loc[suspended_mask, 'volume'] = 0
         df.loc[suspended_mask, 'amount'] = 0
 
-        # 标记停牌
-        df['suspend_flag'] = suspended_mask.astype(int)
+        # 标记停牌（保持与原始列类型一致）
+        if 'suspend_flag' in df.columns:
+            original_dtype = df['suspend_flag'].dtype
+        else:
+            original_dtype = 'int64'
+        df['suspend_flag'] = suspended_mask.astype(original_dtype if isinstance(original_dtype, str) else 'int64')
 
         # 对于停牌且pre_close也为空的情况，尝试用前一天的close填充
         null_pre_close = df['pre_close'].isna() & suspended_mask
