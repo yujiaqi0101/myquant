@@ -1255,13 +1255,13 @@ class MultiFactorQuintileBacktestEngineV2:
     </script>
 </body>
 </html>"""
-    
-    # 保存报告
-    report_path = Path(self.output_dir) / "summary.html"
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    
-    logger.info(f"综合报告已生成: {report_path}")
+        
+        # 保存报告
+        report_path = Path(self.output_dir) / "summary.html"
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"综合报告已生成: {report_path}")
 
 
 if __name__ == '__main__':
