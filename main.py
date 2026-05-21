@@ -520,6 +520,8 @@ def run_quintile_backtest(args, db_path: str):
         n_stocks=args.bt_n_stocks,
         rebalance_freq=args.rebalance_freq,
         seed=args.seed,
+        batch_start=args.batch_start,
+        batch_end=args.batch_end,
     )
     engine.run_all_rounds()
 
@@ -587,6 +589,10 @@ def main():
                         help='报告输出目录 (默认reports/backtest/quintile)')
     parser.add_argument('--max-stocks', type=int, default=500,
                         help='V1回测股票池上限 (默认500)')
+    parser.add_argument('--batch-start', type=int, default=1,
+                        help='起始批次编号 (默认1)')
+    parser.add_argument('--batch-end', type=int, default=7,
+                        help='结束批次编号 (默认7)')
 
     args = parser.parse_args()
 

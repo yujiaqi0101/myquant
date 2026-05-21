@@ -324,6 +324,8 @@ streamlit run src/visualization/dashboard.py
 | `--seed` | 随机种子 | None |
 | `--output-dir` | 报告输出目录 | reports/backtest/quintile |
 | `--max-stocks` | V1回测股票池上限 | 500 |
+| `--batch-start` | 起始批次编号 | 1 |
+| `--batch-end` | 结束批次编号 | 7 |
 
 ## 数据模式说明
 

@@ -485,13 +485,22 @@ class MultiFactorQuintileBacktestEngineV2:
     
     def __init__(self, db_path: str = None, output_dir: str = None, 
                  n_rounds: int = 20, n_stocks: int = 50, 
-                 rebalance_freq: int = 5, seed: int = None):
+                 rebalance_freq: int = 5, seed: int = None,
+                 batch_start: int = 1, batch_end: int = 7):
         
         self.db_path = db_path or r'e:\python_space\myquant\data\aquant.db'
-        self.output_dir = output_dir or r'e:\python_space\myquant\reports\backtest\quintile'
         self.n_rounds = n_rounds
         self.n_stocks = n_stocks
         self.rebalance_freq = rebalance_freq
+        self.batch_start = batch_start
+        self.batch_end = batch_end
+        
+        # 生成回测ID（基于时间戳）
+        self.backtest_id = f"bt_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # 输出目录：在用户指定目录下创建以回测ID命名的子文件夹
+        base_output_dir = output_dir or r'e:\python_space\myquant\reports\backtest\quintile'
+        self.output_dir = str(Path(base_output_dir) / self.backtest_id)
         
         if seed is not None:
             random.seed(seed)
@@ -542,8 +551,9 @@ class MultiFactorQuintileBacktestEngineV2:
             'batches': []
         }
         
-        # 运行每个批次
-        for batch_config in BATCH_CONFIG:
+        # 运行每个批次（支持批次范围切片）
+        active_batches = BATCH_CONFIG[self.batch_start - 1:self.batch_end]
+        for batch_config in active_batches:
             batch_name = batch_config['name']
             train_start = batch_config['train_start']
             train_end = batch_config['train_end']
@@ -998,11 +1008,12 @@ class MultiFactorQuintileBacktestEngineV2:
         # 热力图数据: 各批次 × 各分组的平均年化收益
         quintile_names = ['Q1_top', 'Q2', 'Q3', 'Q4', 'Q5_bottom']
         quintile_labels = ['Q1(Top)', 'Q2', 'Q3', 'Q4', 'Q5(Bottom)']
-        batch_labels = [b['name'] for b in BATCH_CONFIG]
+        active_batches = BATCH_CONFIG[self.batch_start - 1:self.batch_end]
+        batch_labels = [b['name'] for b in active_batches]
         
         # 重新计算热力图数据（从all_results原始数据）
         heatmap_values = []  # [batch_idx, quintile_idx, value]
-        for bi in range(len(BATCH_CONFIG)):
+        for bi in range(len(active_batches)):
             for qi, qname in enumerate(quintile_names):
                 rets = []
                 for result in all_results:
@@ -1020,7 +1031,7 @@ class MultiFactorQuintileBacktestEngineV2:
         # 单调性汇总
         total_mono_checks = 0
         total_mono_pass = 0
-        batch_mono_stats = {b['name']: {'total': 0, 'pass': 0} for b in BATCH_CONFIG}
+        batch_mono_stats = {b['name']: {'total': 0, 'pass': 0} for b in active_batches}
         
         for result in all_results:
             for bi, b in enumerate(result.get('batches', [])):
@@ -1033,8 +1044,8 @@ class MultiFactorQuintileBacktestEngineV2:
                 total_mono_checks += 1
                 if passed:
                     total_mono_pass += 1
-                if bi < len(BATCH_CONFIG):
-                    bname = BATCH_CONFIG[bi]['name']
+                if bi < len(active_batches):
+                    bname = active_batches[bi]['name']
                     batch_mono_stats[bname]['total'] += 1
                     batch_mono_stats[bname]['pass'] += 1
         
@@ -1042,7 +1053,7 @@ class MultiFactorQuintileBacktestEngineV2:
         
         # 生成各批次单调性表格行
         mono_table_rows = ""
-        for b in BATCH_CONFIG:
+        for b in active_batches:
             bname = b['name']
             stats = batch_mono_stats[bname]
             rate = round(stats['pass'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
