@@ -515,9 +515,9 @@ def run_quintile_backtest(args, db_path: str):
     # 日期格式转换: YYYYMMDD -> YYYY-MM-DD
     start_date = None
     end_date = None
-    if args.start_date:
+    if args.start_date and len(args.start_date) == 8:
         start_date = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:]}"
-    if args.end_date:
+    if args.end_date and len(args.end_date) == 8:
         end_date = f"{args.end_date[:4]}-{args.end_date[4:6]}-{args.end_date[6:]}"
 
     # 因子列表解析: 'WQ_001,GTJ_030' -> ['wq_001', 'gtj_030']
@@ -537,9 +537,9 @@ def run_quintile_backtest(args, db_path: str):
         end_date=end_date,
         # 因子选择
         factor_mode=args.factor_mode,
-        factors_per_category=args.factors_per_category,
+        factor_per_category=args.factors_per_category,
         specified_factors=specified_factors,
-        n_factors=args.n_factors,
+        n_random_factors=args.n_factors,
         # 权重方法
         weight_method=args.weight_method,
         # 调仓策略

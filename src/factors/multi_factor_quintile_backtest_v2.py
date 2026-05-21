@@ -857,11 +857,11 @@ class MultiFactorQuintileBacktestEngineV2:
         self.n_rounds = n_rounds
         self.n_stocks = n_stocks
         
-        # 时间段参数
-        self.start_date = start_date
-        self.end_date = end_date
+        # 时间段参数（设置默认值）
+        self.start_date = start_date or '2017-01-01'
+        self.end_date = end_date or '2025-12-31'
         # 计算预热期起始日（向前推375个自然日，约250个交易日）
-        self.warmup_start = (pd.Timestamp(start_date) - timedelta(days=375)).strftime('%Y-%m-%d')
+        self.warmup_start = (pd.Timestamp(self.start_date) - timedelta(days=375)).strftime('%Y-%m-%d')
         
         # 因子选择参数
         self.factor_mode = factor_mode
@@ -1497,7 +1497,7 @@ class MultiFactorQuintileBacktestEngineV2:
                     <div class="label">多空最大回撤</div>
                 </div>
                 <div class="summary-item">
-                    <div class="value">{sum(1 for r in monotonicity_results if r['is_monotonic'])}/{len(monotonicity_results)}</div>
+                    <div class="value">{sum(1 for r in monotonicity_results if r['is_monotonic']) if monotonicity_results else 0}/{len(monotonicity_results) if monotonicity_results else 0}</div>
                     <div class="label">单调性通过批次</div>
                 </div>
             </div>
@@ -1588,10 +1588,11 @@ class MultiFactorQuintileBacktestEngineV2:
                 </tr>
 """
         
+        mono_pass_rate = sum(1 for r in monotonicity_results if r['is_monotonic']) / len(monotonicity_results) if monotonicity_results else 0
         html_content += f"""
             </table>
             <p style="margin-top: 15px; color: #666;">
-                <strong>单调性通过率: {sum(1 for r in monotonicity_results if r['is_monotonic']) / len(monotonicity_results):.1%}</strong>
+                <strong>单调性通过率: {mono_pass_rate:.1%}</strong>
             </p>
         </div>
         
