@@ -33,6 +33,8 @@ from src.risk import RiskManager
 from src.enhancement import IndexEnhancementAnalyzer, IndexConstituentGenerator
 from src.valuation import ValuationAnalyzer
 from src.utils.logger import setup_logger, get_log_files
+from src.factors.multi_factor_quintile_backtest_v2 import MultiFactorQuintileBacktestEngineV2
+from src.factors.multi_factor_backtest import MultiFactorBacktester
 
 # 导入配置
 from config.config import (
@@ -508,6 +510,36 @@ def run_factor_detail(db_path: str, factor_id: str):
     print("=" * 100)
 
 
+def run_quintile_backtest(args, db_path: str):
+    """运行多因子分层回测V2"""
+    output_dir = args.output_dir or str(project_root / 'reports' / 'backtest' / 'quintile')
+    engine = MultiFactorQuintileBacktestEngineV2(
+        db_path=db_path,
+        output_dir=output_dir,
+        n_rounds=args.n_rounds,
+        n_stocks=args.bt_n_stocks,
+        rebalance_freq=args.rebalance_freq,
+        seed=args.seed,
+    )
+    engine.run_all_rounds()
+
+
+def run_multi_factor_backtest(args, db_path: str):
+    """运行多因子分批回测V1"""
+    from pathlib import Path as P
+    report_dir = str(P(db_path).parent.parent / 'reports' / 'backtest')
+    engine = MultiFactorBacktester(
+        db_path=db_path,
+        report_dir=report_dir,
+        seed=args.seed,
+        max_stocks=args.max_stocks,
+    )
+    engine.run_all()
+    report_path = engine.generate_summary_report()
+    if report_path:
+        print(f"   综合报告已生成: {report_path}")
+
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='A股量化分析系统')
@@ -538,6 +570,24 @@ def main():
     parser.add_argument('--factor-detail', default=None, help='查看指定因子的详细信息')
     parser.add_argument('--factor-detail-mode', action='store_true', help='以详细模式显示因子列表')
 
+    # 多因子回测参数
+    parser.add_argument('--quintile-backtest', action='store_true',
+                        help='运行多因子分层回测V2（推荐）')
+    parser.add_argument('--multi-factor-backtest', action='store_true',
+                        help='运行多因子分批回测V1')
+    parser.add_argument('--n-rounds', type=int, default=20,
+                        help='回测轮数 (默认20)')
+    parser.add_argument('--bt-n-stocks', type=int, default=50,
+                        help='回测分组股票数 (默认50)')
+    parser.add_argument('--rebalance-freq', type=int, default=5,
+                        help='调仓频率/交易日 (默认5)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='随机种子 (默认None)')
+    parser.add_argument('--output-dir', default=None,
+                        help='报告输出目录 (默认reports/backtest/quintile)')
+    parser.add_argument('--max-stocks', type=int, default=500,
+                        help='V1回测股票池上限 (默认500)')
+
     args = parser.parse_args()
 
     # 数据模式设置
@@ -564,7 +614,7 @@ def main():
         log_file=None if args.no_log_file else 'aquant.log'
     )
     logger.info("=" * 60)
-    logger.info("A股量化分析系统 v0.4.1 (数据分离版)")
+    logger.info("A股量化分析系统 v0.5.0 (数据分离版)")
     logger.info("=" * 60)
     logger.info(f"数据模式: {mode_display.get(current_mode, current_mode)}")
     logger.info(f"日志级别: {args.log_level}")
@@ -591,6 +641,17 @@ def main():
     if args.factor_detail:
         print(f"\n[因子详情查询: {args.factor_detail}]")
         run_factor_detail(db_path=db_path, factor_id=args.factor_detail)
+        return
+
+    # 多因子回测（优先于数据模式相关操作）
+    if args.quintile_backtest:
+        print("\n[多因子分层回测V2]")
+        run_quintile_backtest(args, db_path)
+        return
+
+    if args.multi_factor_backtest:
+        print("\n[多因子分批回测V1]")
+        run_multi_factor_backtest(args, db_path)
         return
 
     # 1. 生成测试数据

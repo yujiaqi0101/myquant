@@ -222,17 +222,31 @@ class MarketStageDetector:
         # 计算个股涨跌情况
         if isinstance(stock_data.index, pd.MultiIndex):
             # 按日期分组计算涨跌股票数
-            last_date = stock_data.index.get_level_values('trade_date')[-1]
-            prev_date = stock_data.index.get_level_values('trade_date')[-2]
-            
+            dates = stock_data.index.get_level_values('trade_date').unique()
+            if len(dates) < 2:
+                return {
+                    'type': self.DIVERGENCE_NEUTRAL,
+                    'type_name': self._get_divergence_name(self.DIVERGENCE_NEUTRAL),
+                    'index_return': 0,
+                    'up_ratio': 0.5,
+                    'down_ratio': 0.5,
+                    'divergence_value': 0,
+                    'up_stocks': 0,
+                    'down_stocks': 0,
+                    'total_stocks': 0,
+                }
+
+            last_date = dates[-1]
+            prev_date = dates[-2]
+
             last_close = stock_data.xs(last_date, level='trade_date')['close']
             prev_close = stock_data.xs(prev_date, level='trade_date')['close']
-            
+
             # 对齐股票代码
             common_stocks = last_close.index.intersection(prev_close.index)
             last_close = last_close[common_stocks]
             prev_close = prev_close[common_stocks]
-            
+
             stock_returns = (last_close / prev_close - 1)
         else:
             stock_returns = stock_data['close'].pct_change().iloc[-1]
@@ -374,24 +388,36 @@ class MarketStageDetector:
         }
         
         if isinstance(stock_data.index, pd.MultiIndex):
-            # 获取最新一天数据
-            last_date = stock_data.index.get_level_values('trade_date')[-1]
+            # 获取最近两个交易日数据
+            dates = stock_data.index.get_level_values('trade_date').unique()
+            if len(dates) < 2:
+                return sentiment
+
+            last_date = dates[-1]
+            prev_date = dates[-2]
+
             last_data = stock_data.xs(last_date, level='trade_date')
-            
-            # 计算涨跌停（简化：涨跌幅超过9.5%视为涨停）
-            if 'close' in last_data.columns:
-                returns = last_data['close'].pct_change()
-                
-                # 涨停数
-                sentiment['limit_up_count'] = int((returns > 0.095).sum())
-                # 跌停数
-                sentiment['limit_down_count'] = int((returns < -0.095).sum())
-                
-                # 计算情绪分数
-                if sentiment['limit_up_count'] + sentiment['limit_down_count'] > 0:
-                    sentiment['score'] = sentiment['limit_up_count'] / (
-                        sentiment['limit_up_count'] + sentiment['limit_down_count']
-                    )
+            prev_data = stock_data.xs(prev_date, level='trade_date')
+
+            # 计算个股涨跌幅（当日close vs 前一日close）
+            common_stocks = last_data.index.intersection(prev_data.index)
+            if len(common_stocks) == 0:
+                return sentiment
+
+            last_close = last_data.loc[common_stocks, 'close']
+            prev_close = prev_data.loc[common_stocks, 'close']
+            returns = (last_close / prev_close - 1)
+
+            # 涨停数（涨跌幅超过9.5%）
+            sentiment['limit_up_count'] = int((returns > 0.095).sum())
+            # 跌停数（涨跌幅超过-9.5%）
+            sentiment['limit_down_count'] = int((returns < -0.095).sum())
+
+            # 计算情绪分数
+            if sentiment['limit_up_count'] + sentiment['limit_down_count'] > 0:
+                sentiment['score'] = sentiment['limit_up_count'] / (
+                    sentiment['limit_up_count'] + sentiment['limit_down_count']
+                )
         
         return sentiment
     

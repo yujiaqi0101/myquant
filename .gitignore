@@ -21,12 +21,13 @@ data/aquant.db
 data/raw/
 data/processed/
 data/external/
+data/test_*.db
 
 # 测试数据（可通过 python main.py --generate-test-data 重新生成）
 data/test_data/*.csv
 
 # 报告输出（运行时生成）
-reports/*.html
+reports/
 
 # 日志
 logs/
@@ -75,3 +76,6 @@ cython_debug/
 # 临时测试文件
 tests/test4.py
 AGENTS.MD
+
+# IDE/工具
+.trae/

@@ -173,11 +173,10 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_best_category ON best_records(category)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_best_metric ON best_records(category, metric_name)')
 
-            # 指数成分股表
+            # 指数成分股/板块成分股表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS index_constituent (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_date DATE NOT NULL,
                     index_code VARCHAR(20) NOT NULL,
                     stock_code VARCHAR(20) NOT NULL,
                     weight REAL NOT NULL,
@@ -185,11 +184,10 @@ class DatabaseManager:
                     pe_ratio REAL,
                     pb_ratio REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(trade_date, index_code, stock_code)
+                    UNIQUE(index_code, stock_code)
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_index ON index_constituent(index_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_date ON index_constituent(trade_date)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_stock ON index_constituent(stock_code)')
 
             # 组合分析结果表
@@ -445,8 +443,16 @@ class DatabaseManager:
         end_date: Optional[str] = None,
         fields: Optional[List[str]] = None
     ) -> pd.DataFrame:
-        """查询股票日频数据"""
-        sql = 'SELECT * FROM stock_daily WHERE 1=1'
+        """查询股票日频数据（支持按需查询列，节省内存）"""
+        # 动态构建列名，避免 SELECT *
+        if fields:
+            select_cols = ['trade_date', 'stock_code']
+            for f in fields:
+                if f not in select_cols:
+                    select_cols.append(f)
+            sql = f"SELECT {','.join(select_cols)} FROM stock_daily WHERE 1=1"
+        else:
+            sql = 'SELECT * FROM stock_daily WHERE 1=1'
         params = []
 
         if stock_codes:
@@ -470,12 +476,17 @@ class DatabaseManager:
         if df.empty:
             return df
 
-        if fields:
-            available = [f for f in fields if f in df.columns]
-            df = df[['trade_date', 'stock_code'] + available]
-
         df['trade_date'] = pd.to_datetime(df['trade_date'])
         df.set_index(['trade_date', 'stock_code'], inplace=True)
+        return df
+
+    def get_stock_info_filtered(self) -> pd.DataFrame:
+        """获取股票基本信息（用于选股过滤：ST判断 + 新股判断）"""
+        with self.get_connection() as conn:
+            df = pd.read_sql_query(
+                'SELECT stock_code, stock_name, list_date FROM stock_info',
+                conn
+            )
         return df
 
     # ============ 指数日频数据操作 ============
@@ -866,13 +877,14 @@ class DatabaseManager:
     # ============ 指数成分股操作 ============
 
     def insert_index_constituent(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
-        """批量插入指数成分股数据"""
+        """批量插入指数成分股/板块成分股数据"""
         if df.empty:
             return 0
 
         df = df.copy()
+        # 兼容：如果传入 trade_date 列则忽略
         if 'trade_date' in df.columns:
-            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+            df = df.drop(columns=['trade_date'])
 
         with self.get_connection() as conn:
             count = 0
@@ -881,13 +893,13 @@ class DatabaseManager:
                 rows = []
                 for _, row in batch.iterrows():
                     rows.append((
-                        row.get('trade_date'), row.get('index_code'), row.get('stock_code'),
+                        row.get('index_code'), row.get('stock_code'),
                         row.get('weight'), row.get('market_cap'), row.get('pe_ratio'), row.get('pb_ratio')
                     ))
                 conn.cursor().executemany('''
                     INSERT OR REPLACE INTO index_constituent
-                    (trade_date, index_code, stock_code, weight, market_cap, pe_ratio, pb_ratio)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (index_code, stock_code, weight, market_cap, pe_ratio, pb_ratio)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 ''', rows)
                 count += len(rows)
 
@@ -896,16 +908,15 @@ class DatabaseManager:
 
     def get_index_constituent(
         self,
-        index_code: str,
-        trade_date: str
+        index_code: str
     ) -> pd.DataFrame:
-        """获取某指数某日的成分股"""
+        """获取某指数/板块的成分股"""
         with self.get_connection() as conn:
             df = pd.read_sql_query('''
                 SELECT * FROM index_constituent
-                WHERE index_code = ? AND trade_date = ?
+                WHERE index_code = ?
                 ORDER BY weight DESC
-            ''', conn, params=[index_code, trade_date])
+            ''', conn, params=[index_code])
         return df
 
     def get_index_constituent_history(
@@ -914,18 +925,13 @@ class DatabaseManager:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ) -> pd.DataFrame:
-        """获取指数成分股历史数据"""
+        """获取指数成分股数据（兼容旧接口，忽略日期参数）"""
         sql = 'SELECT * FROM index_constituent WHERE index_code = ?'
         params = [index_code]
 
-        if start_date:
-            sql += ' AND trade_date >= ?'
-            params.append(start_date)
-        if end_date:
-            sql += ' AND trade_date <= ?'
-            params.append(end_date)
+        # 兼容：忽略日期参数（表已无 trade_date 列）
 
-        sql += ' ORDER BY trade_date, weight DESC'
+        sql += ' ORDER BY weight DESC'
 
         with self.get_connection() as conn:
             df = pd.read_sql_query(sql, conn, params=params)

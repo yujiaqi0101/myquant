@@ -60,13 +60,110 @@ class Backtester:
             价格数据
         """
         self._price_data = price_data
+
+    @staticmethod
+    def build_stock_filter(
+        stock_info: pd.DataFrame,
+        trade_date,
+        min_list_days: int = 60
+    ) -> set:
+        """
+        构建可选股票池（排除ST、新股）
+
+        Parameters
+        ----------
+        stock_info : pd.DataFrame
+            包含 stock_code, stock_name, list_date 列
+        trade_date : datetime-like
+            当前交易日期
+        min_list_days : int
+            最少上市天数
+
+        Returns
+        -------
+        set
+            可交易股票代码集合
+        """
+        trade_dt = pd.Timestamp(trade_date)
+        valid_codes = set()
+
+        for _, row in stock_info.iterrows():
+            code = row['stock_code']
+            name = str(row.get('stock_name', ''))
+
+            # 排除ST
+            if 'ST' in name.upper():
+                continue
+
+            # 排除新股
+            list_date = row.get('list_date')
+            if pd.notna(list_date) and list_date:
+                try:
+                    list_dt = pd.Timestamp(list_date)
+                    if (trade_dt - list_dt).days < min_list_days:
+                        continue
+                except Exception:
+                    pass
+
+            valid_codes.add(code)
+
+        return valid_codes
+
+    @staticmethod
+    def filter_daily(
+        daily_data: pd.DataFrame,
+        suspend: bool = True,
+        limit_up: bool = True,
+        limit_down: bool = True,
+        zero_volume: bool = True,
+    ) -> pd.DataFrame:
+        """
+        日频过滤：停牌、涨跌停、零成交量
+
+        Parameters
+        ----------
+        daily_data : pd.DataFrame
+            当日截面数据，需包含 close, pre_close, suspend_flag, volume 列
+        suspend : bool
+            是否过滤停牌
+        limit_up : bool
+            是否过滤涨停
+        limit_down : bool
+            是否过滤跌停
+        zero_volume : bool
+            是否过滤零成交量
+
+        Returns
+        -------
+        pd.DataFrame
+            过滤后的数据
+        """
+        mask = pd.Series(True, index=daily_data.index)
+
+        if suspend and 'suspend_flag' in daily_data.columns:
+            mask &= (daily_data['suspend_flag'] == 0)
+
+        if (limit_up or limit_down) and 'pre_close' in daily_data.columns:
+            pre_close = daily_data['pre_close']
+            # pre_close 为空时不过滤
+            valid_pre = pre_close.notna() & (pre_close > 0)
+            if limit_up:
+                mask &= ~((daily_data['close'] >= pre_close * 1.095) & valid_pre)
+            if limit_down:
+                mask &= ~((daily_data['close'] <= pre_close * 0.905) & valid_pre)
+
+        if zero_volume and 'volume' in daily_data.columns:
+            mask &= (daily_data['volume'] > 0)
+
+        return daily_data[mask]
     
     def run_backtest(
         self,
         factor: pd.Series,
         n_stocks: int = 50,
         rebalance_freq: int = 5,
-        long_short: bool = False
+        long_short: bool = False,
+        filter_func=None
     ) -> Dict:
         """
         运行回测
@@ -74,13 +171,15 @@ class Backtester:
         Parameters
         ----------
         factor : pd.Series
-            因子值，索引为 (trade_date, stock_code)
+            因子值序列
         n_stocks : int
             持仓股票数量
         rebalance_freq : int
-            调仓频率（交易日）
+            调仓频率（每N个交易日调仓一次）
         long_short : bool
             是否多空策略
+        filter_func : callable, optional
+            选股过滤回调 filter_func(daily_factor, date, daily_price) -> filtered_factor
         
         Returns
         -------
@@ -89,6 +188,11 @@ class Backtester:
         """
         if self._price_data is None:
             raise ValueError("请先使用 load_data() 加载价格数据")
+        
+        # 重置状态，避免多次调用累积
+        self._trade_records = []
+        self._portfolio_df = None
+        self._last_performance = None
         
         # 获取交易日列表
         if isinstance(factor.index, pd.MultiIndex):
@@ -142,6 +246,15 @@ class Backtester:
             
             # 调仓日
             if i % rebalance_freq == 0:
+                # 应用选股过滤回调
+                if filter_func is not None:
+                    try:
+                        daily_price = self._price_data.xs(date, level='trade_date') \
+                            if isinstance(self._price_data.index, pd.MultiIndex) else self._price_data.loc[date]
+                        daily_factor = filter_func(daily_factor, date, daily_price)
+                    except Exception as e:
+                        logger.debug(f"选股过滤回调异常: {e}")
+
                 # 选股
                 sorted_factor = daily_factor.sort_values(ascending=False)
                 

@@ -41,6 +41,22 @@
   - 交易记录明细
   - 交易统计
 
+### 🧪 多因子回测引擎
+- **V2引擎（推荐）**：多因子分层回测
+  - 多轮随机因子组合回测
+  - 风险平价加权因子合成
+  - 5组分层回测（Q1-Q5及多空组合）
+  - 7个滚动批次（3年回测+1年验证）
+  - 按需加载数据（避免内存溢出）
+  - ST/新股动态过滤
+  - 单调性检验（因子分层收益单调性）
+  - 增强HTML报告（ECharts交互式图表）
+  - 综合Summary报表（统计卡片、收益对比、热力图、单调性汇总）
+- **V1引擎**：多因子分批回测
+  - 20轮单因子 + 5组多因子组合分批回测
+  - pyecharts生成综合HTML报告
+  - 数据库日志记录
+
 ### 🛡️ 风控系统
 - 行业分散度控制
 - 市值暴露控制
@@ -142,7 +158,11 @@ aquant/
 │   │   ├── selector.py    # 因子筛选器
 │   │   ├── backtest.py    # 回测器
 │   │   ├── report_generator.py  # HTML报告生成器
-│   │   └── execution_logger.py  # 执行日志记录器
+│   │   ├── execution_logger.py  # 执行日志记录器
+│   │   ├── multi_factor_backtest.py  # 多因子分批回测引擎V1
+│   │   ├── multi_factor_quintile_backtest.py  # 多因子分层回测V1
+│   │   ├── multi_factor_quintile_backtest_v2.py  # 多因子分层回测引擎V2（推荐）
+│   │   └── simple_quintile_backtest.py  # 简单分层回测(已废弃)
 │   ├── analysis/          # 分析模块
 │   │   ├── market_stage.py # 市场阶段识别
 │   │   └── similarity.py  # 相似度分析
@@ -296,6 +316,14 @@ streamlit run src/visualization/dashboard.py
 | `--n-days` | 测试数据天数 | 250 |
 | `--log-level` | 日志级别 (DEBUG/INFO/WARNING/ERROR) | INFO |
 | `--no-log-file` | 禁用日志文件输出（仅控制台） | False |
+| `--quintile-backtest` | 运行多因子分层回测V2（推荐） | False |
+| `--multi-factor-backtest` | 运行多因子分批回测V1 | False |
+| `--n-rounds` | 回测轮数 | 20 |
+| `--bt-n-stocks` | 回测分组股票数 | 50 |
+| `--rebalance-freq` | 调仓频率/交易日 | 5 |
+| `--seed` | 随机种子 | None |
+| `--output-dir` | 报告输出目录 | reports/backtest/quintile |
+| `--max-stocks` | V1回测股票池上限 | 500 |
 
 ## 数据模式说明
 
@@ -620,12 +648,14 @@ report_path = generate_backtest_report(
 
 ## 版本历史
 
-- **v0.5.0** (2025): 因子系统增强与回测报告
+- **v0.5.0** (2025): 多因子回测引擎与CLI增强
+  - 多因子分层回测V2引擎：风险平价加权、5组分层、7批次滚动回测
+  - 多因子分批回测V1引擎：20轮单因子+5组多因子组合
+  - CLI回测入口：`--quintile-backtest`、`--multi-factor-backtest`
+  - 增强Summary报表：统计卡片、ECharts图表、单调性检验、最佳/最差轮次高亮
   - 因子分类体系：13个分类（技术指标类9个 + 基本面类4个）
   - 基本面因子：估值因子（8个）、盈利因子（5个）、成长因子（5个）、质量因子（4个）
-  - 因子分类筛选：支持按分类筛选因子、分类统计报告
   - 回测HTML报告：使用 ECharts 生成交互式报告
-  - 报告内容：净值曲线、回撤曲线、绩效指标表、交易记录明细
 
 - **v0.4.1** (2025): 测试数据与真实数据分离
   - 测试数据不再写入数据库，改为CSV文件存储

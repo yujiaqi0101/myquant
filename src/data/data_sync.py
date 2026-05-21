@@ -9,6 +9,7 @@
 """
 
 import logging
+import sqlite3
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Callable
 
@@ -435,9 +436,16 @@ class DataSynchronizer:
                 except Exception as e:
                     logger.debug(f"获取板块 [{sector_name}] 成分股失败: {e}")
 
+            # 写入板块成分股到 index_constituent 表（weight为0）
+            if sector_constituent_rows:
+                sector_df = pd.DataFrame(sector_constituent_rows)
+                sector_df = sector_df.rename(columns={'sector_code': 'index_code'})
+                sector_df['weight'] = 0.0
+                self.db.insert_index_constituent(sector_df)
+                logger.info(f"写入板块成分股: {len(sector_constituent_rows)} 条")
+
             # 同步指数成分股权重
             index_weight_count = 0
-            today_str = datetime.now().strftime('%Y-%m-%d')
             index_constituent_rows = []
 
             # 先下载指数权重数据
@@ -454,7 +462,6 @@ class DataSynchronizer:
                     if weight_data and isinstance(weight_data, dict) and len(weight_data) > 0:
                         for stock_code, weight in weight_data.items():
                             index_constituent_rows.append({
-                                'trade_date': today_str,
                                 'index_code': index_code,
                                 'stock_code': stock_code,
                                 'weight': float(weight),
@@ -904,37 +911,135 @@ class DataSynchronizer:
             except Exception as e:
                 logger.debug(f"进度回调异常: {e}")
 
+    def get_all_index_codes(self) -> set:
+        """
+        从数据库动态获取所有指数/板块代码
+
+        Returns
+        -------
+        set
+            指数代码集合
+        """
+        try:
+            conn = sqlite3.connect(self.db.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT DISTINCT index_code FROM index_constituent')
+            codes = {row[0] for row in cursor.fetchall()}
+            conn.close()
+            return codes
+        except Exception as e:
+            logger.warning(f"从数据库获取指数代码失败: {e}")
+            return set()
+
+    # 缓存动态指数代码，避免频繁查库
+    _dynamic_index_codes_cache = None
+    _dynamic_index_codes_time = None
+
+    def _get_cached_index_codes(self) -> set:
+        """获取带缓存的动态指数代码（缓存5分钟）"""
+        import time
+        now = time.time()
+        if (self._dynamic_index_codes_cache is not None
+                and self._dynamic_index_codes_time is not None
+                and now - self._dynamic_index_codes_time < 300):
+            return self._dynamic_index_codes_cache
+
+        codes = self.get_all_index_codes()
+        self._dynamic_index_codes_cache = codes
+        self._dynamic_index_codes_time = now
+        return codes
+
     def _is_index_code(self, code) -> bool:
         """
         判断是否为指数代码
 
-        规则：
-        1. 在已知指数代码列表中
-        2. 代码以 .SH 或 .SZ 结尾，且数字部分以 399 开头（深交所指数）
-
-        Parameters
-        ----------
-        code : str
-            合约代码
-
-        Returns
-        -------
-        bool
-            是否为指数
+        优先级：
+        1. 硬编码已知指数列表
+        2. 数据库 index_constituent 表中的指数/板块
+        3. 399开头（深交所指数）
         """
         if not isinstance(code, str):
             return False
 
-        # 在已知指数列表中
+        # 1. 硬编码已知指数列表
         if code in self.KNOWN_INDEX_CODES:
             return True
 
-        # 399开头的一律视为深交所指数
+        # 2. 数据库中的指数/板块
+        try:
+            dynamic_codes = self._get_cached_index_codes()
+            if code in dynamic_codes:
+                return True
+        except Exception:
+            pass
+
+        # 3. 399开头的一律视为深交所指数
         code_part = code.split('.')[0] if '.' in code else code
         if code_part.startswith('399') and len(code_part) == 6:
             return True
 
         return False
+
+    def get_instrument_type(self, stock_code: str) -> str:
+        """
+        获取标的类型
+
+        优先级: 数据库 product_type > 指数判断 > 代码规则
+
+        Parameters
+        ----------
+        stock_code : str
+            标的代码，如 '000001.SZ'
+
+        Returns
+        -------
+        str
+            标的类型: 'stock', 'index', 'etf', 'fund', 'bond', 'future', 'option', 'unknown'
+        """
+        if not isinstance(stock_code, str) or not stock_code:
+            return 'unknown'
+
+        # 1. 检查是否为指数（包括板块）
+        if self._is_index_code(stock_code):
+            return 'index'
+
+        # 2. 从 qmt_instrument 表查询 product_type
+        try:
+            df = self.db.get_qmt_instruments()
+            if not df.empty and 'stock_code' in df.columns and stock_code in df['stock_code'].values:
+                row = df[df['stock_code'] == stock_code].iloc[0]
+                product_type = row.get('product_type')
+                type_map = {
+                    1: 'stock', 2: 'index', 3: 'fund', 4: 'etf',
+                    5: 'bond', 6: 'future', 7: 'option',
+                }
+                result = type_map.get(product_type, 'unknown')
+                if result != 'unknown':
+                    return result
+        except Exception as e:
+            logger.debug(f"从数据库获取标的类型失败 [{stock_code}]: {e}")
+
+        # 3. 回退到代码规则判断
+        code_part = stock_code.split('.')[0] if '.' in stock_code else stock_code
+        exchange = stock_code.split('.')[1] if '.' in stock_code else ''
+
+        # 期货（上海期货交易所后缀 SF）
+        if exchange == 'SF':
+            return 'future'
+
+        # ETF（常见代码前缀）
+        if len(code_part) == 6 and code_part.startswith(('51', '15', '16', '58', '59')):
+            return 'etf'
+
+        # 基金
+        if len(code_part) == 6 and code_part.startswith('50'):
+            return 'fund'
+
+        # 债券
+        if len(code_part) == 6 and code_part.startswith(('11', '12', '13')):
+            return 'bond'
+
+        return 'stock'
 
     @staticmethod
     def _format_qmt_date(value) -> Optional[str]:
