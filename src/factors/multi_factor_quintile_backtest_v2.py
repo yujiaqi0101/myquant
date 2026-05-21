@@ -859,7 +859,7 @@ class MultiFactorQuintileBacktestEngineV2:
         
         # 时间段参数（设置默认值）
         self.start_date = start_date or '2017-01-01'
-        self.end_date = end_date or '2025-12-31'
+        self.end_date = end_date or datetime.now().strftime('%Y-%m-%d')
         # 计算预热期起始日（向前推375个自然日，约250个交易日）
         self.warmup_start = (pd.Timestamp(self.start_date) - timedelta(days=375)).strftime('%Y-%m-%d')
         
