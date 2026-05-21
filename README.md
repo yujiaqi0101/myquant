@@ -43,10 +43,22 @@
 
 ### 🧪 多因子回测引擎
 - **V2引擎（推荐）**：多因子分层回测
-  - 多轮随机因子组合回测
-  - 风险平价加权因子合成
+  - **扩充因子池**：8类因子（动量/均值回复/波动率/成交量/相关性/质量/趋势/形态），来自 alpha101/alpha191
+  - **3种因子选择模式**：
+    - `category`：每类随机选择（可指定每类因子数量）
+    - `specified`：用户指定具体因子列表
+    - `random`：从全部因子池中完全随机选择
+  - **4种权重算法**：
+    - `equal`：等权加权
+    - `risk_parity`：风险平价加权
+    - `ic_weighted`：IC加权（基于历史IC值）
+    - `ir_weighted`：IR加权（基于历史IR值）
+  - **时间段控制**：`--start-date`/`--end-date` 灵活指定回测区间
+  - **调仓策略**：
+    - `fixed_days`：固定持有N天后调仓
+    - `calendar`：日历驱动调仓（每日/每周/每月第N个交易日）
+  - **调仓价格**：`close`（收盘价）、`next_open`（次日开盘价）
   - 5组分层回测（Q1-Q5及多空组合）
-  - 7个滚动批次（3年回测+1年验证）
   - 按需加载数据（避免内存溢出）
   - ST/新股动态过滤
   - 单调性检验（因子分层收益单调性）
@@ -320,12 +332,19 @@ streamlit run src/visualization/dashboard.py
 | `--multi-factor-backtest` | 运行多因子分批回测V1 | False |
 | `--n-rounds` | 回测轮数 | 20 |
 | `--bt-n-stocks` | 回测分组股票数 | 50 |
-| `--rebalance-freq` | 调仓频率/交易日 | 5 |
 | `--seed` | 随机种子 | None |
 | `--output-dir` | 报告输出目录 | reports/backtest/quintile |
 | `--max-stocks` | V1回测股票池上限 | 500 |
-| `--batch-start` | 起始批次编号 | 1 |
-| `--batch-end` | 结束批次编号 | 7 |
+| `--factor-mode` | 因子选择模式：`category`/`specified`/`random` | category |
+| `--factors-per-category` | 每类因子数量（category模式） | 2 |
+| `--factors` | 指定因子列表，逗号分隔（specified模式） | - |
+| `--n-factors` | 随机因子数量（random模式） | 8 |
+| `--weight-method` | 权重算法：`equal`/`risk_parity`/`ic_weighted`/`ir_weighted` | equal |
+| `--rebalance-mode` | 调仓模式：`fixed_days`/`calendar` | fixed_days |
+| `--rebalance-price` | 调仓价格：`close`/`next_open` | close |
+| `--hold-days` | 固定持有天数（fixed_days模式） | 5 |
+| `--calendar-freq` | 日历频率：`daily`/`weekly`/`monthly`（calendar模式） | monthly |
+| `--calendar-n` | 日历第N个交易日（calendar模式） | 1 |
 
 ## 数据模式说明
 
@@ -594,6 +613,32 @@ valuation_factors = fund.calculate_valuation_factors()
 profit_factors = fund.calculate_profitability_factors()
 ```
 
+### 多因子分层回测V2（推荐）
+
+```bash
+# 类别随机模式，每类2个因子，风险平价加权
+python main.py --quintile-backtest --factor-mode category --factors-per-category 2 --weight-method risk_parity
+
+# 指定因子模式
+python main.py --quintile-backtest --factor-mode specified --factors WQ_001,GTJ_030
+
+# 日历调仓，每月第1个交易日，次日开盘价调仓
+python main.py --quintile-backtest --rebalance-mode calendar --calendar-freq monthly --calendar-n 1 --rebalance-price next_open
+
+# 完整示例：指定时间区间、类别模式、IC加权、固定5天调仓
+python main.py --quintile-backtest \
+    --start-date 20220101 \
+    --end-date 20241231 \
+    --factor-mode category \
+    --factors-per-category 3 \
+    --weight-method ic_weighted \
+    --rebalance-mode fixed_days \
+    --hold-days 5 \
+    --rebalance-price close \
+    --n-rounds 10 \
+    --output-dir reports/my_backtest
+```
+
 ### 回测HTML报告生成
 
 ```python
@@ -649,6 +694,15 @@ report_path = generate_backtest_report(
 - **因子计算**: 自研算法
 
 ## 版本历史
+
+- **v0.6.0** (2025): 多因子回测引擎V2重构
+  - 扩充因子池：8类因子（动量/均值回复/波动率/成交量/相关性/质量/趋势/形态），来自 alpha101/alpha191
+  - 3种因子选择模式：`category`（每类随机）、`specified`（用户指定）、`random`（全随机）
+  - 4种权重算法：`equal`（等权）、`risk_parity`（风险平价）、`ic_weighted`（IC加权）、`ir_weighted`（IR加权）
+  - 时间段控制：`--start-date`/`--end-date` 替代原Batch机制，灵活指定回测区间
+  - 调仓策略：`fixed_days`（固定持有N天）、`calendar`（日历驱动：每日/每周/每月第N个交易日）
+  - 调仓价格：`close`（收盘价）、`next_open`（次日开盘价）
+  - CLI参数重构：删除 `--batch-start`、`--batch-end`、`--rebalance-freq`，新增因子/权重/调仓相关参数
 
 - **v0.5.0** (2025): 多因子回测引擎与CLI增强
   - 多因子分层回测V2引擎：风险平价加权、5组分层、7批次滚动回测

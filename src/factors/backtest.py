@@ -163,7 +163,9 @@ class Backtester:
         n_stocks: int = 50,
         rebalance_freq: int = 5,
         long_short: bool = False,
-        filter_func=None
+        filter_func=None,
+        rebalance_dates: Optional[List[pd.Timestamp]] = None,
+        rebalance_price: str = 'close',
     ) -> Dict:
         """
         运行回测
@@ -175,11 +177,15 @@ class Backtester:
         n_stocks : int
             持仓股票数量
         rebalance_freq : int
-            调仓频率（每N个交易日调仓一次）
+            调仓频率（每N个交易日调仓一次，仅在rebalance_dates为None时使用）
         long_short : bool
             是否多空策略
         filter_func : callable, optional
             选股过滤回调 filter_func(daily_factor, date, daily_price) -> filtered_factor
+        rebalance_dates : List[pd.Timestamp], optional
+            指定的调仓日期列表，如果提供则优先使用
+        rebalance_price : str
+            调仓价格类型: 'close' (收盘价) 或 'next_open' (次日开盘价)
         
         Returns
         -------
@@ -200,11 +206,19 @@ class Backtester:
         else:
             trade_dates = factor.index.sort_values()
         
+        # 处理调仓日期
+        if rebalance_dates is not None:
+            # 将调仓日期转换为集合以便快速查找
+            rebalance_date_set = set(rebalance_dates)
+        else:
+            # 使用固定频率调仓
+            rebalance_date_set = set(trade_dates[::rebalance_freq])
+        
         # 初始化
         capital = self.initial_capital
         positions = {}  # 股票代码 -> 数量
         portfolio_values = []
-        
+
         for i, date in enumerate(trade_dates):
             # 获取当日因子值
             try:
@@ -214,7 +228,7 @@ class Backtester:
                     daily_factor = factor.loc[date]
             except KeyError:
                 continue
-            
+
             # 获取当日价格
             try:
                 if isinstance(self._price_data.index, pd.MultiIndex):
@@ -223,7 +237,7 @@ class Backtester:
                     daily_price = self._price_data.loc[date]
             except KeyError:
                 continue
-            
+
             # 计算当前持仓市值
             position_value = 0
             for stock_code, quantity in positions.items():
@@ -243,9 +257,11 @@ class Backtester:
                 'capital': capital,
                 'position_value': position_value,
             })
-            
-            # 调仓日
-            if i % rebalance_freq == 0:
+
+            # 调仓日判断
+            is_rebalance_day = date in rebalance_date_set
+
+            if is_rebalance_day:
                 # 应用选股过滤回调
                 if filter_func is not None:
                     try:
@@ -257,7 +273,7 @@ class Backtester:
 
                 # 选股
                 sorted_factor = daily_factor.sort_values(ascending=False)
-                
+
                 if long_short:
                     # 多空策略
                     long_stocks = sorted_factor.head(n_stocks // 2).index.tolist()
@@ -266,61 +282,89 @@ class Backtester:
                     # 多头策略
                     long_stocks = sorted_factor.head(n_stocks).index.tolist()
                     short_stocks = []
-                
+
+                # 确定调仓价格
+                if rebalance_price == 'next_open':
+                    # 使用次日开盘价调仓
+                    if i + 1 < len(trade_dates):
+                        next_date = trade_dates[i + 1]
+                        try:
+                            if isinstance(self._price_data.index, pd.MultiIndex):
+                                next_daily_price = self._price_data.xs(next_date, level='trade_date')
+                            else:
+                                next_daily_price = self._price_data.loc[next_date]
+                            trade_price_col = 'open'
+                            trade_date = next_date
+                        except KeyError:
+                            # 次日数据不存在，使用当日收盘价
+                            next_daily_price = daily_price
+                            trade_price_col = 'close'
+                            trade_date = date
+                    else:
+                        # 最后一天，使用当日收盘价
+                        next_daily_price = daily_price
+                        trade_price_col = 'close'
+                        trade_date = date
+                else:
+                    # 使用当日收盘价调仓
+                    next_daily_price = daily_price
+                    trade_price_col = 'close'
+                    trade_date = date
+
                 # 清仓
                 for stock_code in list(positions.keys()):
                     try:
-                        if isinstance(daily_price.index, pd.MultiIndex):
-                            price = daily_price.xs(stock_code, level='stock_code')['close']
+                        if isinstance(next_daily_price.index, pd.MultiIndex):
+                            price = next_daily_price.xs(stock_code, level='stock_code')[trade_price_col]
                         else:
-                            price = daily_price[daily_price['stock_code'] == stock_code]['close'].iloc[0]
-                        
+                            price = next_daily_price[next_daily_price['stock_code'] == stock_code][trade_price_col].iloc[0]
+
                         quantity = positions[stock_code]
                         trade_value = price * quantity
-                        
+
                         # 计算交易成本
                         commission = abs(trade_value) * self.commission_rate
                         slippage_cost = abs(trade_value) * self.slippage
-                        
+
                         capital += trade_value - commission - slippage_cost
-                        
+
                         self._trade_records.append({
-                            'date': date,
+                            'date': trade_date,
                             'stock_code': stock_code,
                             'action': 'sell',
                             'price': price,
                             'quantity': quantity,
                             'value': trade_value,
                         })
-                        
+
                         del positions[stock_code]
                     except Exception:
                         pass
-                
+
                 # 开仓
                 if long_stocks:
                     available_capital = capital * (1 - self.position_limit * 0.1)  # 保留部分现金
                     capital_per_stock = available_capital / len(long_stocks)
-                    
+
                     for stock_code in long_stocks:
                         try:
-                            if isinstance(daily_price.index, pd.MultiIndex):
-                                price = daily_price.xs(stock_code, level='stock_code')['close']
+                            if isinstance(next_daily_price.index, pd.MultiIndex):
+                                price = next_daily_price.xs(stock_code, level='stock_code')[trade_price_col]
                             else:
-                                price = daily_price[daily_price['stock_code'] == stock_code]['close'].iloc[0]
-                            
+                                price = next_daily_price[next_daily_price['stock_code'] == stock_code][trade_price_col].iloc[0]
+
                             quantity = int(capital_per_stock / price / 100) * 100  # 整手
-                            
+
                             if quantity > 0:
                                 trade_value = price * quantity
                                 commission = trade_value * self.commission_rate
                                 slippage_cost = trade_value * self.slippage
-                                
+
                                 capital -= trade_value + commission + slippage_cost
                                 positions[stock_code] = quantity
-                                
+
                                 self._trade_records.append({
-                                    'date': date,
+                                    'date': trade_date,
                                     'stock_code': stock_code,
                                     'action': 'buy',
                                     'price': price,

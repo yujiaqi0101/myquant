@@ -34,13 +34,50 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 因子池定义
+# 因子池定义（扩充版）
+# 命名格式: ('wq', id) = WorldQuant Alpha, ('gtj', id) = 国泰君安 Alpha
 FACTOR_POOL = {
-    'momentum': [6, 20],
-    'mean_reversion': [3, 5],
-    'volatility': [7, 8],
-    'volume_anomaly': [9, 14],
-    'correlation': [10, 12],
+    # 动量类 - 价格趋势类因子
+    'momentum': [
+        ('wq', 1), ('wq', 2), ('wq', 3),   # WQ: ts_delta, ts_rank, ts_max相关
+        ('wq', 9), ('wq', 10), ('wq', 11), ('wq', 12),  # WQ: 动量/相关性
+        ('gtj', 9), ('gtj', 10), ('gtj', 11), ('gtj', 12),  # GTJ: 动量因子
+    ],
+    # 均值回复类 - 短期反转类因子
+    'reversal': [
+        ('wq', 4), ('wq', 5), ('wq', 6),   # WQ: 均值回复
+        ('gtj', 6), ('gtj', 7), ('gtj', 8),  # GTJ: 均值回复
+    ],
+    # 波动率类 - 波动率/分散度类因子
+    'volatility': [
+        ('wq', 7), ('wq', 8), ('wq', 22), ('wq', 23),  # WQ: 波动率
+        ('gtj', 13), ('gtj', 14), ('gtj', 15),  # GTJ: 波动率因子
+    ],
+    # 成交量类 - 成交量异常/资金流类因子
+    'volume': [
+        ('wq', 13), ('wq', 14), ('wq', 15),  # WQ: 成交量因子
+        ('gtj', 24), ('gtj', 25), ('gtj', 26),  # GTJ: 成交量因子
+    ],
+    # 相关性类 - 与其他标的的相关性类因子
+    'correlation': [
+        ('wq', 16), ('wq', 17), ('wq', 18),  # WQ: 相关性
+        ('gtj', 16), ('gtj', 17), ('gtj', 18),  # GTJ: 相关性
+    ],
+    # 质量类 - 基本面/价值类因子
+    'quality': [
+        ('wq', 48), ('wq', 56),  # WQ: 行业中性化因子
+        ('gtj', 60), ('gtj', 61),  # GTJ: 质量因子
+    ],
+    # 趋势强度类 - 趋势跟踪类因子
+    'trend': [
+        ('wq', 24), ('wq', 25), ('wq', 26),  # WQ: 趋势
+        ('gtj', 30), ('gtj', 31), ('gtj', 32),  # GTJ: 趋势强度
+    ],
+    # 形态类 - K线形态/价格位置类因子
+    'pattern': [
+        ('wq', 30), ('wq', 31), ('wq', 32),  # WQ: 价格形态
+        ('gtj', 43), ('gtj', 44), ('gtj', 45),  # GTJ: K线形态
+    ],
 }
 
 # 批次定义
@@ -111,12 +148,13 @@ def load_batch_data(db, start_date: str, end_date: str, chunk_size: int = 500000
     return df
 
 
-def calculate_alpha_factor(price_data: pd.DataFrame, factor_id: int) -> pd.Series:
+def calculate_alpha_factor(price_data: pd.DataFrame, factor_source: str, factor_id: int) -> pd.Series:
     """
-    根据价格数据计算WorldQuant Alpha因子（简化版本）
+    根据价格数据计算Alpha因子（支持WorldQuant和国泰君安）
     
     参数:
         price_data: MultiIndex (trade_date, stock_code) 的价格数据
+        factor_source: 'wq' (WorldQuant) 或 'gtj' (国泰君安)
         factor_id: 因子编号
     
     返回:
@@ -137,56 +175,321 @@ def calculate_alpha_factor(price_data: pd.DataFrame, factor_id: int) -> pd.Serie
         """时间序列排名"""
         return x.rolling(window).apply(lambda s: pd.Series(s).rank().iloc[-1] / len(s) if len(s) > 0 else 0.5)
     
+    def ts_delta(x, window=1):
+        """时间序列差分"""
+        return x.groupby(level='stock_code').diff(window)
+    
+    def ts_max(x, window=10):
+        """时间序列最大值"""
+        return x.groupby(level='stock_code').rolling(window).max().reset_index(level=0, drop=True)
+    
+    def ts_min(x, window=10):
+        """时间序列最小值"""
+        return x.groupby(level='stock_code').rolling(window).min().reset_index(level=0, drop=True)
+    
+    def ts_sum(x, window=10):
+        """时间序列求和"""
+        return x.groupby(level='stock_code').rolling(window).sum().reset_index(level=0, drop=True)
+    
     def rank(x):
         """截面排名"""
         return x.groupby(level='trade_date').rank(pct=True)
     
-    # 根据factor_id选择计算逻辑
-    if factor_id == 3:  # alpha_003: 日内动量
-        factor = rank(open_p) * rank(volume)
-    elif factor_id == 5:  # alpha_005: 开盘-close相关性
-        factor = -1 * rank(ts_corr(open_p, close, 10))
-    elif factor_id == 6:  # alpha_006: 开盘-成交量相关性
-        factor = -1 * rank(ts_corr(open_p, volume, 10))
-    elif factor_id == 7:  # alpha_007: 日内收益
-        factor = rank(close - open_p)
-    elif factor_id == 8:  # alpha_008: 高低点排名
-        factor = -1 * rank(ts_rank(high, 10) - ts_rank(low, 10))
-    elif factor_id == 9:  # alpha_009: 成交量变化
-        factor = rank(volume - volume.groupby(level='stock_code').shift(1))
-    elif factor_id == 10:  # alpha_010: 收益排名
-        factor = rank(close.groupby(level='stock_code').pct_change())
-    elif factor_id == 12:  # alpha_012: 开盘收益
-        factor = rank(open_p / close.groupby(level='stock_code').shift(1) - 1)
-    elif factor_id == 14:  # alpha_014: 收盘价收益
-        factor = rank(close / open_p - 1)
-    elif factor_id == 20:  # alpha_020: 开盘-收盘价相关性
-        factor = -1 * rank(ts_corr(open_p, close, 5))
+    # 根据因子来源和编号选择计算逻辑
+    if factor_source == 'wq':
+        # WorldQuant Alpha 因子
+        if factor_id == 1:  # alpha_001: 日内收益排名
+            factor = rank(ts_corr(close, volume, 6))
+        elif factor_id == 2:  # alpha_002: 开盘-最高相关性
+            factor = -1 * rank(ts_corr(open_p, high, 3))
+        elif factor_id == 3:  # alpha_003: 日内动量
+            factor = rank(open_p) * rank(volume)
+        elif factor_id == 4:  # alpha_004: 开盘-最低相关性
+            factor = -1 * rank(ts_corr(low, volume, 10))
+        elif factor_id == 5:  # alpha_005: 开盘-close相关性
+            factor = -1 * rank(ts_corr(open_p, close, 10))
+        elif factor_id == 6:  # alpha_006: 开盘-成交量相关性
+            factor = -1 * rank(ts_corr(open_p, volume, 10))
+        elif factor_id == 7:  # alpha_007: 日内收益
+            factor = rank(close - open_p)
+        elif factor_id == 8:  # alpha_008: 高低点排名
+            factor = -1 * rank(ts_rank(high, 10) - ts_rank(low, 10))
+        elif factor_id == 9:  # alpha_009: 成交量变化
+            factor = rank(volume - volume.groupby(level='stock_code').shift(1))
+        elif factor_id == 10:  # alpha_010: 收益排名
+            factor = rank(close.groupby(level='stock_code').pct_change())
+        elif factor_id == 11:  # alpha_011: 开盘-最高相关性
+            factor = rank(ts_corr(high, volume, 6))
+        elif factor_id == 12:  # alpha_012: 开盘收益
+            factor = rank(open_p / close.groupby(level='stock_code').shift(1) - 1)
+        elif factor_id == 13:  # alpha_013: 成交量-收益相关性
+            factor = rank(ts_corr(volume, close.groupby(level='stock_code').pct_change(), 5))
+        elif factor_id == 14:  # alpha_014: 收盘价收益
+            factor = rank(close / open_p - 1)
+        elif factor_id == 15:  # alpha_015: 开盘-最高排名
+            factor = rank(high / open_p - 1)
+        elif factor_id == 16:  # alpha_016: 收盘-最高相关性
+            factor = -1 * rank(ts_corr(close, high, 5))
+        elif factor_id == 17:  # alpha_017: 收盘-成交量相关性
+            factor = -1 * rank(ts_corr(close, volume, 10))
+        elif factor_id == 18:  # alpha_018: 开盘-收盘相关性
+            factor = -1 * rank(ts_corr(open_p, close, 5))
+        elif factor_id == 22:  # alpha_022: 收益标准差
+            factor = -1 * rank(close.groupby(level='stock_code').pct_change().rolling(5).std())
+        elif factor_id == 23:  # alpha_023: 收益波动
+            factor = rank(close.groupby(level='stock_code').pct_change().rolling(20).std())
+        elif factor_id == 24:  # alpha_024: 收盘-开盘趋势
+            factor = rank(close - open_p)
+        elif factor_id == 25:  # alpha_025: 收益排名趋势
+            factor = rank(ts_rank(close.groupby(level='stock_code').pct_change(), 9))
+        elif factor_id == 26:  # alpha_026: 最高-最低趋势
+            factor = rank(high - low)
+        elif factor_id == 30:  # alpha_030: 开盘-最低排名
+            factor = rank(open_p - low)
+        elif factor_id == 31:  # alpha_031: 收盘-最低排名
+            factor = rank(close - low)
+        elif factor_id == 32:  # alpha_032: 最高-收盘排名
+            factor = rank(high - close)
+        elif factor_id == 48:  # alpha_048: 行业中性化收益（简化）
+            factor = rank(close.groupby(level='stock_code').pct_change(5))
+        elif factor_id == 56:  # alpha_056: 行业中性化波动（简化）
+            factor = -1 * rank(close.groupby(level='stock_code').pct_change().rolling(10).std())
+        else:
+            # 默认因子
+            factor = rank(close.groupby(level='stock_code').pct_change(5))
+    
+    elif factor_source == 'gtj':
+        # 国泰君安 Alpha 因子（简化实现）
+        if factor_id == 6:  # GTJ_006: 均值回复 - 收益反转
+            factor = -1 * rank(close.groupby(level='stock_code').pct_change(5))
+        elif factor_id == 7:  # GTJ_007: 均值回复 - 开盘反转
+            factor = -1 * rank(open_p / close.groupby(level='stock_code').shift(1) - 1)
+        elif factor_id == 8:  # GTJ_008: 均值回复 - 成交量反转
+            factor = -1 * rank(volume / volume.groupby(level='stock_code').shift(5))
+        elif factor_id == 9:  # GTJ_009: 动量 - 5日收益
+            factor = rank(close.groupby(level='stock_code').pct_change(5))
+        elif factor_id == 10:  # GTJ_010: 动量 - 10日收益
+            factor = rank(close.groupby(level='stock_code').pct_change(10))
+        elif factor_id == 11:  # GTJ_011: 动量 - 20日收益
+            factor = rank(close.groupby(level='stock_code').pct_change(20))
+        elif factor_id == 12:  # GTJ_012: 动量 - 开盘动量
+            factor = rank(open_p / close.groupby(level='stock_code').shift(5) - 1)
+        elif factor_id == 13:  # GTJ_013: 波动率 - 5日波动
+            factor = -1 * rank(close.groupby(level='stock_code').pct_change().rolling(5).std())
+        elif factor_id == 14:  # GTJ_014: 波动率 - 10日波动
+            factor = -1 * rank(close.groupby(level='stock_code').pct_change().rolling(10).std())
+        elif factor_id == 15:  # GTJ_015: 波动率 - 20日波动
+            factor = -1 * rank(close.groupby(level='stock_code').pct_change().rolling(20).std())
+        elif factor_id == 16:  # GTJ_016: 相关性 - 收益-成交量相关
+            factor = rank(ts_corr(close.groupby(level='stock_code').pct_change(), volume, 5))
+        elif factor_id == 17:  # GTJ_017: 相关性 - 开盘-收盘相关
+            factor = rank(ts_corr(open_p, close, 5))
+        elif factor_id == 18:  # GTJ_018: 相关性 - 最高-最低相关
+            factor = rank(ts_corr(high, low, 5))
+        elif factor_id == 24:  # GTJ_024: 成交量 - 5日成交量均值
+            factor = rank(volume.groupby(level='stock_code').rolling(5).mean().reset_index(level=0, drop=True))
+        elif factor_id == 25:  # GTJ_025: 成交量 - 10日成交量均值
+            factor = rank(volume.groupby(level='stock_code').rolling(10).mean().reset_index(level=0, drop=True))
+        elif factor_id == 26:  # GTJ_026: 成交量 - 成交量变化率
+            factor = rank(volume / volume.groupby(level='stock_code').shift(5))
+        elif factor_id == 30:  # GTJ_030: 趋势 - 5日均线偏离
+            factor = rank(close / close.groupby(level='stock_code').rolling(5).mean().reset_index(level=0, drop=True) - 1)
+        elif factor_id == 31:  # GTJ_031: 趋势 - 10日均线偏离
+            factor = rank(close / close.groupby(level='stock_code').rolling(10).mean().reset_index(level=0, drop=True) - 1)
+        elif factor_id == 32:  # GTJ_032: 趋势 - 20日均线偏离
+            factor = rank(close / close.groupby(level='stock_code').rolling(20).mean().reset_index(level=0, drop=True) - 1)
+        elif factor_id == 43:  # GTJ_043: 形态 - 上影线
+            factor = rank((high - close) / (high - low + 1e-10))
+        elif factor_id == 44:  # GTJ_044: 形态 - 下影线
+            factor = rank((close - low) / (high - low + 1e-10))
+        elif factor_id == 45:  # GTJ_045: 形态 - 实体比例
+            factor = rank(abs(close - open_p) / (high - low + 1e-10))
+        elif factor_id == 60:  # GTJ_060: 质量 - 收益稳定性（简化）
+            factor = -1 * rank(close.groupby(level='stock_code').pct_change().rolling(20).std())
+        elif factor_id == 61:  # GTJ_061: 质量 - 收益一致性（简化）
+            factor = rank(ts_corr(close.groupby(level='stock_code').pct_change(), 
+                                  close.groupby(level='stock_code').pct_change().shift(1), 10))
+        else:
+            # 默认因子
+            factor = rank(close.groupby(level='stock_code').pct_change(5))
     else:
-        # 默认因子
+        # 未知来源，使用默认因子
         factor = rank(close.groupby(level='stock_code').pct_change(5))
     
     return factor
 
 
-def risk_parity_weights(factors_dict: Dict[str, pd.Series]) -> Dict[str, float]:
-    """计算风险平价权重"""
+class FactorSelector:
+    """因子选择器 - 支持3种选择模式"""
+    
+    def __init__(self, factor_pool: dict = None):
+        self.factor_pool = factor_pool or FACTOR_POOL
+    
+    def select(self, mode: str, **kwargs) -> List[Tuple[str, int]]:
+        """
+        选择因子
+        
+        Parameters
+        ----------
+        mode : str
+            'category': 每类随机选择
+            'specified': 用户指定
+            'random': 全随机
+        
+        Returns
+        -------
+        List[Tuple[str, int]]: [(factor_source, factor_id), ...]
+        """
+        if mode == 'category':
+            return self._select_by_category(kwargs.get('n_per_category', 1))
+        elif mode == 'specified':
+            return self._select_by_specified(kwargs.get('factors', []))
+        elif mode == 'random':
+            return self._select_random(kwargs.get('n_total', 4))
+        else:
+            raise ValueError(f"Unknown factor mode: {mode}")
+    
+    def _select_by_category(self, n_per_category: int = 1) -> List[Tuple[str, int]]:
+        """从每个类别随机选择N个因子"""
+        selected = []
+        for category, factors in self.factor_pool.items():
+            n = min(n_per_category, len(factors))
+            selected.extend(random.sample(factors, n))
+        return selected
+    
+    def _select_by_specified(self, factors: List[str]) -> List[Tuple[str, int]]:
+        """根据用户指定的因子列表选择"""
+        selected = []
+        for f in factors:
+            # 解析格式: "wq_001" 或 "gtj_030"
+            parts = f.lower().split('_')
+            if len(parts) == 2:
+                source, fid = parts[0], int(parts[1])
+                selected.append((source, fid))
+        return selected
+    
+    def _select_random(self, n_total: int = 4) -> List[Tuple[str, int]]:
+        """从所有因子中随机选择N个"""
+        all_factors = []
+        for factors in self.factor_pool.values():
+            all_factors.extend(factors)
+        n = min(n_total, len(all_factors))
+        return random.sample(all_factors, n)
+
+
+def calculate_factor_weights(factors_dict: Dict[str, pd.Series], 
+                            returns: pd.DataFrame = None,
+                            method: str = 'risk_parity') -> Dict[str, float]:
+    """
+    计算因子权重
+    
+    Parameters
+    ----------
+    factors_dict : Dict[str, pd.Series]
+        各因子值，键为因子名（如 'wq_001'）
+    returns : pd.DataFrame
+        收益率数据（IC/IR加权时需要）
+    method : str
+        'equal': 等权
+        'risk_parity': 风险平价（波动率倒数加权）
+        'ic_weighted': IC加权
+        'ir_weighted': IR加权
+    
+    Returns
+    -------
+    Dict[str, float]: {因子名: 权重}
+    """
     if not factors_dict:
         return {}
     
-    volatilities = {}
-    for factor_name, factor_series in factors_dict.items():
-        # 计算截面波动率的均值
-        daily_std = factor_series.groupby(level='trade_date').std()
-        vol = daily_std.mean()
-        volatilities[factor_name] = vol if pd.notna(vol) and vol > 0 else 1.0
+    if method == 'equal':
+        # 等权
+        n = len(factors_dict)
+        return {name: 1.0/n for name in factors_dict.keys()}
     
-    # 风险平价: weight = (1/vol) / sum(1/vol)
-    inv_vols = {k: 1.0 / v for k, v in volatilities.items()}
-    total_inv_vol = sum(inv_vols.values())
-    weights = {k: v / total_inv_vol for k, v in inv_vols.items()}
+    elif method == 'risk_parity':
+        # 风险平价 - 波动率倒数加权
+        volatilities = {}
+        for factor_name, factor_series in factors_dict.items():
+            daily_std = factor_series.groupby(level='trade_date').std()
+            vol = daily_std.mean()
+            volatilities[factor_name] = vol if pd.notna(vol) and vol > 0 else 1.0
+        
+        inv_vols = {k: 1.0 / v for k, v in volatilities.items()}
+        total_inv_vol = sum(inv_vols.values())
+        return {k: v / total_inv_vol for k, v in inv_vols.items()}
     
-    return weights
+    elif method == 'ic_weighted':
+        # IC加权 - 基于IC均值绝对值
+        if returns is None:
+            logger.warning("IC加权需要收益率数据，回退到等权")
+            n = len(factors_dict)
+            return {name: 1.0/n for name in factors_dict.keys()}
+        
+        ics = {}
+        for factor_name, factor_series in factors_dict.items():
+            # 计算因子与下期收益的IC
+            ic = _calc_ic(factor_series, returns)
+            ics[factor_name] = abs(ic) if pd.notna(ic) else 0
+        
+        total_ic = sum(ics.values())
+        if total_ic > 0:
+            return {k: v / total_ic for k, v in ics.items()}
+        else:
+            n = len(factors_dict)
+            return {name: 1.0/n for name in factors_dict.keys()}
+    
+    elif method == 'ir_weighted':
+        # IR加权 - 基于IR值
+        if returns is None:
+            logger.warning("IR加权需要收益率数据，回退到等权")
+            n = len(factors_dict)
+            return {name: 1.0/n for name in factors_dict.keys()}
+        
+        irs = {}
+        for factor_name, factor_series in factors_dict.items():
+            ir = _calc_ir(factor_series, returns)
+            irs[factor_name] = abs(ir) if pd.notna(ir) else 0
+        
+        total_ir = sum(irs.values())
+        if total_ir > 0:
+            return {k: v / total_ir for k, v in irs.items()}
+        else:
+            n = len(factors_dict)
+            return {name: 1.0/n for name in factors_dict.keys()}
+    
+    else:
+        raise ValueError(f"Unknown weight method: {method}")
+
+
+def _calc_ic(factor: pd.Series, returns: pd.DataFrame, forward_period: int = 1) -> float:
+    """计算因子IC（信息系数）"""
+    # 简化实现：计算因子与下期收益的相关系数
+    factor_df = factor.reset_index()
+    factor_df['next_return'] = returns['close'].pct_change(forward_period).shift(-forward_period).values
+    ic = factor_df[factor.name].corr(factor_df['next_return'])
+    return ic if pd.notna(ic) else 0
+
+
+def _calc_ir(factor: pd.Series, returns: pd.DataFrame, forward_period: int = 1) -> float:
+    """计算因子IR（信息比率）"""
+    # 计算滚动IC的均值/标准差
+    factor_df = factor.reset_index()
+    factor_df['next_return'] = returns['close'].pct_change(forward_period).shift(-forward_period).values
+    
+    # 按日期分组计算每日IC
+    daily_ic = factor_df.groupby('trade_date').apply(
+        lambda x: x[factor.name].corr(x['next_return']) if len(x) > 1 else np.nan
+    ).dropna()
+    
+    if len(daily_ic) > 1:
+        return daily_ic.mean() / (daily_ic.std() + 1e-10)
+    return 0
+
+
+def risk_parity_weights(factors_dict: Dict[str, pd.Series]) -> Dict[str, float]:
+    """计算风险平价权重（兼容旧代码）"""
+    return calculate_factor_weights(factors_dict, method='risk_parity')
 
 
 def combine_factors(factors_dict: Dict[str, pd.Series], weights: Dict[str, float]) -> pd.Series:
@@ -481,19 +784,100 @@ def run_quintile_backtest(combined_factor: pd.Series, price_data: pd.DataFrame,
 
 
 class MultiFactorQuintileBacktestEngineV2:
-    """多因子分层回测引擎 V2"""
+    """多因子分层回测引擎 V2 - 重构版
     
-    def __init__(self, db_path: str = None, output_dir: str = None, 
-                 n_rounds: int = 20, n_stocks: int = 50, 
-                 rebalance_freq: int = 5, seed: int = None,
-                 batch_start: int = 1, batch_end: int = 7):
+    支持自定义时间段、多种因子选择模式、权重方法和调仓策略
+    """
+    
+    def __init__(self, 
+                 db_path: str = None, 
+                 output_dir: str = None,
+                 # 时间段参数
+                 start_date: str = '2020-01-01',
+                 end_date: str = '2024-12-31',
+                 # 回测轮数
+                 n_rounds: int = 20,
+                 n_stocks: int = 50,
+                 seed: int = None,
+                 # 因子选择参数
+                 factor_mode: str = 'category',  # 'category', 'specified', 'random'
+                 factor_per_category: int = 1,   # category 模式下每类选择的因子数
+                 specified_factors: List[str] = None,  # specified 模式下指定的因子列表，如 ['wq_1', 'gtj_9']
+                 n_random_factors: int = 4,      # random 模式下随机选择的因子总数
+                 # 权重参数
+                 weight_method: str = 'risk_parity',  # 'equal', 'risk_parity', 'ic_weighted', 'ir_weighted'
+                 # 调仓策略参数
+                 rebalance_mode: str = 'fixed_days',  # 'fixed_days', 'calendar'
+                 rebalance_price: str = 'close',      # 'close', 'next_open'
+                 hold_days: int = 5,                   # fixed_days 模式下持仓天数
+                 calendar_freq: str = 'month',         # calendar 模式下: 'week', 'month', 'quarter', 'year'
+                 calendar_n: int = 1,                  # calendar 模式下: 第N个交易日
+                 ):
+        """
+        初始化多因子分层回测引擎 V2
         
+        Parameters
+        ----------
+        db_path : str
+            数据库路径
+        output_dir : str
+            输出目录
+        start_date : str
+            回测开始日期 (YYYY-MM-DD)
+        end_date : str
+            回测结束日期 (YYYY-MM-DD)
+        n_rounds : int
+            回测轮数（每轮随机选择不同因子组合）
+        n_stocks : int
+            每组选股数量
+        seed : int
+            随机种子
+        factor_mode : str
+            因子选择模式: 'category'(每类选N个), 'specified'(指定因子), 'random'(全随机)
+        factor_per_category : int
+            category 模式下每类选择的因子数
+        specified_factors : List[str]
+            specified 模式下指定的因子列表，如 ['wq_1', 'gtj_9']
+        n_random_factors : int
+            random 模式下随机选择的因子总数
+        weight_method : str
+            权重计算方法: 'equal', 'risk_parity', 'ic_weighted', 'ir_weighted'
+        rebalance_mode : str
+            调仓模式: 'fixed_days'(固定天数), 'calendar'(日历模式)
+        rebalance_price : str
+            调仓价格: 'close'(收盘价), 'next_open'(次日开盘价)
+        hold_days : int
+            fixed_days 模式下持仓天数
+        calendar_freq : str
+            calendar 模式下: 'week', 'month', 'quarter', 'year'
+        calendar_n : int
+            calendar 模式下每月/周/季度/年第N个交易日
+        """
         self.db_path = db_path or r'e:\python_space\myquant\data\aquant.db'
         self.n_rounds = n_rounds
         self.n_stocks = n_stocks
-        self.rebalance_freq = rebalance_freq
-        self.batch_start = batch_start
-        self.batch_end = batch_end
+        
+        # 时间段参数
+        self.start_date = start_date
+        self.end_date = end_date
+        # 计算预热期起始日（向前推375个自然日，约250个交易日）
+        self.warmup_start = (pd.Timestamp(start_date) - timedelta(days=375)).strftime('%Y-%m-%d')
+        
+        # 因子选择参数
+        self.factor_mode = factor_mode
+        self.factor_per_category = factor_per_category
+        self.specified_factors = specified_factors or []
+        self.n_random_factors = n_random_factors
+        
+        # 权重参数
+        self.weight_method = weight_method
+        
+        # 调仓策略参数
+        self.rebalance_mode = rebalance_mode
+        self.rebalance_price = rebalance_price
+        self.hold_days = hold_days
+        self.calendar_freq = calendar_freq
+        self.calendar_n = calendar_n
         
         # 生成回测ID（基于时间戳）
         self.backtest_id = f"bt_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -517,130 +901,458 @@ class MultiFactorQuintileBacktestEngineV2:
         self.stock_info = self.db.get_stock_info_filtered()
         logger.info(f"股票信息加载完成: {len(self.stock_info)} 只股票")
         
+        # 记录配置信息
+        logger.info(f"=" * 70)
         logger.info(f"初始化多因子分层回测引擎 V2")
+        logger.info(f"=" * 70)
         logger.info(f"数据库路径: {self.db_path}")
         logger.info(f"输出目录: {self.output_dir}")
+        logger.info(f"回测期间: {self.start_date} ~ {self.end_date}")
+        logger.info(f"预热期起始: {self.warmup_start}")
         logger.info(f"回测轮数: {n_rounds}")
+        logger.info(f"因子选择模式: {factor_mode}")
+        if factor_mode == 'category':
+            logger.info(f"  每类因子数: {factor_per_category}")
+        elif factor_mode == 'specified':
+            logger.info(f"  指定因子: {specified_factors}")
+        elif factor_mode == 'random':
+            logger.info(f"  随机因子数: {n_random_factors}")
+        logger.info(f"权重方法: {weight_method}")
+        logger.info(f"调仓模式: {rebalance_mode}")
+        if rebalance_mode == 'fixed_days':
+            logger.info(f"  持仓天数: {hold_days}")
+        elif rebalance_mode == 'calendar':
+            logger.info(f"  调仓频率: {calendar_freq}, 第 {calendar_n} 个交易日")
+        logger.info(f"调仓价格: {rebalance_price}")
+        logger.info(f"=" * 70)
     
-    def select_random_factors(self, n_factors: int = None) -> List[Tuple[str, int]]:
-        """随机选择因子"""
-        if n_factors is None:
-            n_factors = random.randint(2, 4)
+    def get_rebalance_dates(self, trade_dates: List[pd.Timestamp]) -> List[pd.Timestamp]:
+        """
+        根据 rebalance_mode 生成调仓日期
         
-        all_factors = []
-        for category, factor_ids in FACTOR_POOL.items():
-            for fid in factor_ids:
-                all_factors.append((category, fid))
+        Parameters
+        ----------
+        trade_dates : List[pd.Timestamp]
+            所有交易日列表（已排序）
         
-        selected = random.sample(all_factors, min(n_factors, len(all_factors)))
+        Returns
+        -------
+        List[pd.Timestamp]: 调仓日期列表
+        """
+        if trade_dates is None or len(trade_dates) == 0:
+            return []
+        
+        trade_dates = sorted(trade_dates)
+        
+        if self.rebalance_mode == 'fixed_days':
+            # 每 hold_days 个交易日调仓
+            return trade_dates[::self.hold_days]
+        
+        elif self.rebalance_mode == 'calendar':
+            # 根据 calendar_freq 和 calendar_n 生成调仓日期
+            rebalance_dates = []
+            
+            if self.calendar_freq == 'week':
+                # 每周第N个交易日
+                for i in range(0, len(trade_dates), 5):  # 每周约5个交易日
+                    idx = i + self.calendar_n - 1
+                    if idx < len(trade_dates):
+                        rebalance_dates.append(trade_dates[idx])
+            
+            elif self.calendar_freq == 'month':
+                # 每月第N个交易日
+                current_month = None
+                for date in trade_dates:
+                    if date.month != current_month:
+                        current_month = date.month
+                        month_dates = [d for d in trade_dates if d.month == current_month and d.year == date.year]
+                        idx = self.calendar_n - 1
+                        if idx < len(month_dates):
+                            rebalance_dates.append(month_dates[idx])
+            
+            elif self.calendar_freq == 'quarter':
+                # 每季度第N个交易日
+                current_quarter = None
+                for date in trade_dates:
+                    quarter = (date.month - 1) // 3 + 1
+                    if quarter != current_quarter:
+                        current_quarter = quarter
+                        quarter_dates = [d for d in trade_dates 
+                                       if (d.month - 1) // 3 + 1 == current_quarter and d.year == date.year]
+                        idx = self.calendar_n - 1
+                        if idx < len(quarter_dates):
+                            rebalance_dates.append(quarter_dates[idx])
+            
+            elif self.calendar_freq == 'year':
+                # 每年第N个交易日
+                current_year = None
+                for date in trade_dates:
+                    if date.year != current_year:
+                        current_year = date.year
+                        year_dates = [d for d in trade_dates if d.year == current_year]
+                        idx = self.calendar_n - 1
+                        if idx < len(year_dates):
+                            rebalance_dates.append(year_dates[idx])
+            
+            return rebalance_dates
+        
+        else:
+            raise ValueError(f"Unknown rebalance mode: {self.rebalance_mode}")
+    
+    def execute_rebalance(self, 
+                         current_positions: Dict[str, int],
+                         new_selection: set,
+                         price_data: pd.DataFrame,
+                         date: pd.Timestamp,
+                         nav: float,
+                         commission_rate: float = 0.0003) -> Tuple[Dict[str, int], float]:
+        """
+        执行调仓操作
+        
+        Parameters
+        ----------
+        current_positions : Dict[str, int]
+            当前持仓 {股票代码: 股数}
+        new_selection : set
+            新的选股结果
+        price_data : pd.DataFrame
+            价格数据
+        date : pd.Timestamp
+            调仓日期
+        nav : float
+            当前现金
+        commission_rate : float
+            佣金费率
+        
+        Returns
+        -------
+        Tuple[Dict[str, int], float]: (新持仓, 新现金)
+        """
+        # 确定调仓价格
+        if self.rebalance_price == 'close':
+            price_col = 'close'
+        elif self.rebalance_price == 'next_open':
+            price_col = 'open'
+        else:
+            raise ValueError(f"Unknown rebalance price: {self.rebalance_price}")
+        
+        # 获取当日价格
+        try:
+            daily_price = price_data.xs(date, level='trade_date')
+        except KeyError:
+            logger.warning(f"调仓日 {date} 无价格数据")
+            return current_positions, nav
+        
+        # 卖出不在新选股中的持仓
+        positions_to_sell = set(current_positions.keys()) - new_selection
+        for stock_code in positions_to_sell:
+            if stock_code in daily_price.index:
+                price = daily_price.loc[stock_code, price_col]
+                if pd.notna(price) and price > 0:
+                    shares = current_positions[stock_code]
+                    sell_value = shares * price
+                    commission = sell_value * commission_rate
+                    nav += sell_value - commission
+            del current_positions[stock_code]
+        
+        # 计算需要买入的新股票
+        positions_to_keep = set(current_positions.keys()) & new_selection
+        new_stocks_to_buy = new_selection - positions_to_keep
+        
+        if not new_stocks_to_buy:
+            return current_positions, nav
+        
+        # 等权分配资金
+        total_positions = len(positions_to_keep) + len(new_stocks_to_buy)
+        capital_per_stock = nav / len(new_stocks_to_buy) if new_stocks_to_buy else 0
+        
+        # 买入新股票
+        for stock_code in new_stocks_to_buy:
+            if stock_code in daily_price.index:
+                price = daily_price.loc[stock_code, price_col]
+                if pd.notna(price) and price > 0:
+                    shares = int(capital_per_stock / price / 100) * 100  # 整手
+                    if shares > 0:
+                        buy_value = shares * price
+                        commission = buy_value * commission_rate
+                        nav -= buy_value + commission
+                        current_positions[stock_code] = shares
+        
+        return current_positions, nav
+    
+    def _run_quintile_backtest_v2(self, 
+                                  combined_factor: pd.Series,
+                                  price_data: pd.DataFrame,
+                                  rebalance_dates: List[pd.Timestamp],
+                                  min_list_days: int = 60) -> Dict[str, BacktestResult]:
+        """
+        5组分层回测 V2（支持新的调仓策略）
+        
+        Parameters
+        ----------
+        combined_factor : pd.Series
+            合成因子值
+        price_data : pd.DataFrame
+            价格数据
+        rebalance_dates : List[pd.Timestamp]
+            调仓日期列表
+        min_list_days : int
+            最小上市天数
+        
+        Returns
+        -------
+        Dict[str, BacktestResult]: 各分组回测结果
+        """
+        from src.factors.backtest import Backtester
+        
+        results = {}
+        
+        # 获取所有交易日
+        trade_dates = sorted(combined_factor.index.get_level_values('trade_date').unique())
+        rebalance_dates_set = set(rebalance_dates)
+        
+        quintile_names = ['Q1_top', 'Q2', 'Q3', 'Q4', 'Q5_bottom']
+        
+        # 每个quintile的持仓记录：{调仓日: set(股票代码)}
+        quintile_holdings = {qname: {} for qname in quintile_names}
+        # 多空组合持仓：{调仓日: {'long': set(...), 'short': set(...)}}
+        long_short_holdings = {}
+        
+        # 逐调仓日动态分组
+        for date in rebalance_dates:
+            # 动态构建当日可选股票集合
+            valid_stock_set = Backtester.build_stock_filter(self.stock_info, date, min_list_days=min_list_days)
+            
+            # 获取当日因子截面
+            try:
+                date_factor = combined_factor.xs(date, level='trade_date')
+            except KeyError:
+                continue
+            
+            if date_factor.empty:
+                continue
+            
+            # 按因子值降序排序
+            sorted_factor = date_factor.sort_values(ascending=False)
+            n = len(sorted_factor)
+            if n < 5:
+                continue
+            
+            # 分5组边界
+            boundaries = [0, n // 5, 2 * n // 5, 3 * n // 5, 4 * n // 5, n]
+            
+            # 获取当日截面数据进行日频过滤
+            try:
+                daily_price = price_data.xs(date, level='trade_date')
+            except KeyError:
+                daily_price = pd.DataFrame()
+            
+            if not daily_price.empty:
+                filtered_daily = Backtester.filter_daily(daily_price)
+                tradable_stocks = set(filtered_daily.index)
+            else:
+                tradable_stocks = set(date_factor.index)
+            
+            final_tradable = tradable_stocks & valid_stock_set
+            
+            for qi, qname in enumerate(quintile_names):
+                group_stocks = sorted_factor.iloc[boundaries[qi]:boundaries[qi + 1]].index
+                tradable_in_group = set(s for s in group_stocks if s in final_tradable)
+                quintile_holdings[qname][date] = tradable_in_group
+            
+            # 多空组合
+            top_stocks = set(s for s in sorted_factor.iloc[boundaries[0]:boundaries[1]].index if s in final_tradable)
+            bottom_stocks = set(s for s in sorted_factor.iloc[boundaries[4]:boundaries[5]].index if s in final_tradable)
+            long_short_holdings[date] = {'long': top_stocks, 'short': bottom_stocks}
+        
+        # 预构建 close_pivot（只做一次 unstack，所有分组共用）
+        logger.info("    构建 close_pivot...")
+        close_pivot = price_data['close'].unstack(level='stock_code')
+        
+        # 计算每个quintile的净值曲线
+        for qname in quintile_names:
+            logger.info(f"    回测 {qname}...")
+            
+            nav_df = _calc_group_nav(
+                quintile_holdings[qname], close_pivot,
+                trade_dates, rebalance_dates_set
+            )
+            
+            performance = _calc_performance(nav_df)
+            
+            results[qname] = BacktestResult(
+                portfolio_values=nav_df,
+                performance=performance,
+                trade_records=[]
+            )
+        
+        # 多空组合净值曲线
+        logger.info("    回测多空组合 (Q1 - Q5)...")
+        
+        # 多空组合：Q1做多 + Q5做空
+        q1_nav = _calc_group_nav(
+            quintile_holdings['Q1_top'], close_pivot,
+            trade_dates, rebalance_dates_set
+        )
+        q5_nav = _calc_group_nav(
+            quintile_holdings['Q5_bottom'], close_pivot,
+            trade_dates, rebalance_dates_set
+        )
+        
+        if not q1_nav.empty and not q5_nav.empty:
+            # 多空组合净值 = 初始资金 + (Q1净值 - 初始资金) - (Q5净值 - 初始资金)
+            ls_nav = pd.DataFrame({
+                'date': q1_nav['date'],
+                'nav': q1_nav['nav'].values - q5_nav['nav'].values + 1000000.0
+            })
+            ls_performance = _calc_performance(ls_nav)
+            
+            results['long_short'] = BacktestResult(
+                portfolio_values=ls_nav,
+                performance=ls_performance,
+                trade_records=[]
+            )
+        else:
+            logger.warning("    多空组合数据为空，跳过")
+            results['long_short'] = BacktestResult()
+        
+        # 释放内存
+        del quintile_holdings
+        del long_short_holdings
+        del close_pivot
+        del q1_nav
+        del q5_nav
+        gc.collect()
+        
+        return results
+    
+    def select_factors(self) -> List[Tuple[str, int]]:
+        """
+        根据 factor_mode 选择因子
+        
+        Returns
+        -------
+        List[Tuple[str, int]]: [(factor_source, factor_id), ...]
+            factor_source: 'wq' 或 'gtj'
+            factor_id: 因子编号
+        """
+        selector = FactorSelector(FACTOR_POOL)
+        
+        if self.factor_mode == 'category':
+            selected = selector.select('category', n_per_category=self.factor_per_category)
+        elif self.factor_mode == 'specified':
+            selected = selector.select('specified', factors=self.specified_factors)
+        elif self.factor_mode == 'random':
+            selected = selector.select('random', n_total=self.n_random_factors)
+        else:
+            raise ValueError(f"Unknown factor mode: {self.factor_mode}")
+        
+        logger.info(f"选中因子: {selected}")
         return selected
     
     def run_single_round(self, round_id: int) -> Dict:
-        """运行单轮回测"""
+        """
+        运行单轮回测
+        
+        每轮选择一组因子，在指定时间段内进行分层回测
+        """
         logger.info(f"\n{'='*70}")
         logger.info(f"第 {round_id}/{self.n_rounds} 轮回测")
         logger.info(f"{'='*70}")
         
         # 选择因子
-        selected_factors = self.select_random_factors()
-        logger.info(f"选中因子: {selected_factors}")
+        selected_factors = self.select_factors()
         
         round_results = {
             'round_id': round_id,
             'factors': selected_factors,
-            'batches': []
+            'batches': []  # 保持兼容，但只会有一个元素
         }
         
-        # 运行每个批次（支持批次范围切片）
-        active_batches = BATCH_CONFIG[self.batch_start - 1:self.batch_end]
-        for batch_config in active_batches:
-            batch_name = batch_config['name']
-            train_start = batch_config['train_start']
-            train_end = batch_config['train_end']
-            test_start = batch_config['test_start']
-            test_end = batch_config['test_end']
+        try:
+            # 加载数据（含预热期）
+            logger.info(f"加载数据: {self.warmup_start} ~ {self.end_date}")
+            price_data = load_batch_data(self.db, self.warmup_start, self.end_date)
+            if price_data.empty:
+                logger.warning("数据为空，跳过")
+                return round_results
             
-            logger.info(f"\n  [{batch_name}] 回测期: {train_start}~{train_end}, 验证期: {test_start}~{test_end}")
+            # 计算因子（使用含预热期的数据）
+            factors_dict = {}
+            for source, factor_id in selected_factors:
+                factor_name = f"{source}_{factor_id:03d}"
+                factor_values = calculate_alpha_factor(price_data, source, factor_id)
+                if not factor_values.empty:
+                    factors_dict[factor_name] = factor_values
             
-            try:
-                # 加载回测期数据（含预热期）
-                train_data = load_batch_data(self.db, train_start, train_end)
-                if train_data.empty:
-                    logger.warning(f"    回测期数据为空，跳过")
-                    continue
-                
-                # 计算因子（使用含预热期的数据）
-                factors_dict = {}
-                for category, factor_id in selected_factors:
-                    factor_name = f"{category}_alpha_{factor_id:03d}"
-                    factor_values = calculate_alpha_factor(train_data, factor_id)
-                    if not factor_values.empty:
-                        factors_dict[factor_name] = factor_values
-                
-                if not factors_dict:
-                    logger.warning(f"    没有有效因子，跳过")
-                    del train_data
-                    gc.collect()
-                    continue
-                
-                # 计算风险平价权重
-                weights = risk_parity_weights(factors_dict)
-                logger.info(f"    风险平价权重: {weights}")
-                
-                # 保存权重到 round_results（只保存第一批次的权重作为代表）
-                if not round_results.get('factor_weights'):
-                    round_results['factor_weights'] = weights
-                
-                # 合成因子
-                combined_factor = combine_factors(factors_dict, weights)
-                
-                # 裁剪预热期：只保留正式回测期内的因子值
-                formal_start = pd.Timestamp(train_start)
-                idx = combined_factor.index.get_level_values('trade_date')
-                combined_factor = combined_factor[idx >= formal_start]
-                
-                # 同时裁剪价格数据到正式回测期
-                price_idx = train_data.index.get_level_values('trade_date')
-                train_data = train_data[price_idx >= formal_start]
-                
-                logger.info(f"    裁剪预热期后因子长度: {len(combined_factor)}, 价格数据: {len(train_data)}")
-                
-                # 5组分层回测（传入stock_info用于选股过滤）
-                quintile_results = run_quintile_backtest(
-                    combined_factor, train_data, self.stock_info,
-                    self.n_stocks, self.rebalance_freq
-                )
-                
-                # 记录结果
-                batch_result = {
-                    'batch_name': batch_name,
-                    'weights': weights,
-                    'quintile_performance': {}
-                }
-                
-                for quintile_name, result in quintile_results.items():
-                    perf = result.performance
-                    batch_result['quintile_performance'][quintile_name] = {
-                        'annual_return': perf.get('annual_return', 0),
-                        'sharpe_ratio': perf.get('sharpe_ratio', 0),
-                        'max_drawdown': perf.get('max_drawdown', 0),
-                        'win_rate': perf.get('win_rate', 0),
-                    }
-                
-                round_results['batches'].append(batch_result)
-                
-                # 内存管理：释放本批次数据
-                del train_data
-                del factors_dict
-                del combined_factor
-                del quintile_results
+            if not factors_dict:
+                logger.warning("没有有效因子，跳过")
+                del price_data
                 gc.collect()
-                
-            except Exception as e:
-                logger.error(f"    批次回测失败: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
+                return round_results
+            
+            # 计算因子权重
+            # 计算收益率用于IC/IR加权
+            returns = price_data['close'].unstack(level='stock_code').pct_change()
+            weights = calculate_factor_weights(factors_dict, returns, self.weight_method)
+            logger.info(f"因子权重 ({self.weight_method}): {weights}")
+            
+            # 保存权重
+            round_results['factor_weights'] = weights
+            
+            # 合成因子
+            combined_factor = combine_factors(factors_dict, weights)
+            
+            # 裁剪预热期：只保留正式回测期内的因子值
+            formal_start = pd.Timestamp(self.start_date)
+            idx = combined_factor.index.get_level_values('trade_date')
+            combined_factor = combined_factor[idx >= formal_start]
+            
+            # 同时裁剪价格数据到正式回测期
+            price_idx = price_data.index.get_level_values('trade_date')
+            price_data = price_data[price_idx >= formal_start]
+            
+            logger.info(f"裁剪预热期后因子长度: {len(combined_factor)}, 价格数据: {len(price_data)}")
+            
+            # 生成调仓日期
+            trade_dates = sorted(combined_factor.index.get_level_values('trade_date').unique())
+            rebalance_dates = self.get_rebalance_dates(trade_dates)
+            logger.info(f"调仓日期数量: {len(rebalance_dates)}")
+            
+            # 5组分层回测（使用新的调仓日期生成逻辑）
+            quintile_results = self._run_quintile_backtest_v2(
+                combined_factor, price_data, rebalance_dates
+            )
+            
+            # 记录结果
+            batch_result = {
+                'batch_name': 'SinglePeriod',
+                'weights': weights,
+                'quintile_performance': {}
+            }
+            
+            for quintile_name, result in quintile_results.items():
+                perf = result.performance
+                batch_result['quintile_performance'][quintile_name] = {
+                    'annual_return': perf.get('annual_return', 0),
+                    'sharpe_ratio': perf.get('sharpe_ratio', 0),
+                    'max_drawdown': perf.get('max_drawdown', 0),
+                    'win_rate': perf.get('win_rate', 0),
+                }
+            
+            round_results['batches'].append(batch_result)
+            
+            # 内存管理
+            del price_data
+            del factors_dict
+            del combined_factor
+            del quintile_results
+            gc.collect()
+            
+        except Exception as e:
+            logger.error(f"回测失败: {e}")
+            import traceback
+            traceback.print_exc()
         
         return round_results
     
@@ -697,14 +1409,14 @@ class MultiFactorQuintileBacktestEngineV2:
         avg_perf = self._calc_average_performance(batches)
         
         # 构建HTML内容
-        factor_tags = ''.join([f'<span class="factor-tag">{cat}_alpha_{fid:03d}</span>' for cat, fid in factors])
+        factor_tags = ''.join([f'<span class="factor-tag">{source}_{fid:03d}</span>' for source, fid in factors])
         
         # 构建因子权重图例（在f-string外部生成，避免嵌套问题）
         legend_items = []
-        for cat, fid in factors:
-            factor_name = f"{cat}_alpha_{fid:03d}"
+        for source, fid in factors:
+            factor_name = f"{source}_{fid:03d}"
             weight = factor_weights.get(factor_name, 0)
-            color_hash = abs(hash(cat)) % 16777215
+            color_hash = abs(hash(source)) % 16777215
             legend_items.append(f'<div class="legend-item"><span class="legend-color" style="background: #{color_hash:06x};"></span><span>{factor_name}: {weight:.2%}</span></div>')
         factor_legend = ''.join(legend_items)
         
@@ -1005,36 +1717,31 @@ class MultiFactorQuintileBacktestEngineV2:
         js_q5_data = json.dumps([round(float(r['avg_performance']['Q5_bottom']['annual_return']) * 100, 2) for r in round_stats])
         js_ls_data = json.dumps([round(float(r['avg_performance']['long_short']['annual_return']) * 100, 2) for r in round_stats])
         
-        # 热力图数据: 各批次 × 各分组的平均年化收益
+        # 分组名称
         quintile_names = ['Q1_top', 'Q2', 'Q3', 'Q4', 'Q5_bottom']
         quintile_labels = ['Q1(Top)', 'Q2', 'Q3', 'Q4', 'Q5(Bottom)']
-        active_batches = BATCH_CONFIG[self.batch_start - 1:self.batch_end]
-        batch_labels = [b['name'] for b in active_batches]
         
-        # 重新计算热力图数据（从all_results原始数据）
-        heatmap_values = []  # [batch_idx, quintile_idx, value]
-        for bi in range(len(active_batches)):
-            for qi, qname in enumerate(quintile_names):
-                rets = []
-                for result in all_results:
-                    batches = result.get('batches', [])
-                    if bi < len(batches):
-                        qp = batches[bi].get('quintile_performance', {})
-                        rets.append(float(qp.get(qname, {}).get('annual_return', 0)) * 100)
-                avg_val = round(float(np.mean(rets)), 2) if rets else 0
-                heatmap_values.append([bi, qi, avg_val])
+        # 计算各分组在各轮次中的平均年化收益（用于热力图）
+        # 行：轮次，列：分组
+        heatmap_values = []  # [round_idx, quintile_idx, value]
+        for ri, result in enumerate(all_results):
+            batches = result.get('batches', [])
+            if batches:
+                qp = batches[0].get('quintile_performance', {})
+                for qi, qname in enumerate(quintile_names):
+                    ret = float(qp.get(qname, {}).get('annual_return', 0)) * 100
+                    heatmap_values.append([ri, qi, round(ret, 2)])
         
         js_heatmap_data = json.dumps(heatmap_values)
-        js_batch_labels = json.dumps(batch_labels)
+        js_round_labels_for_heatmap = json.dumps([f"第{r['round_id']}轮" for r in round_stats])
         js_quintile_labels = json.dumps(quintile_labels)
         
         # 单调性汇总
         total_mono_checks = 0
         total_mono_pass = 0
-        batch_mono_stats = {b['name']: {'total': 0, 'pass': 0} for b in active_batches}
         
         for result in all_results:
-            for bi, b in enumerate(result.get('batches', [])):
+            for b in result.get('batches', []):
                 qp = b.get('quintile_performance', {})
                 returns = []
                 for i in range(1, 6):
@@ -1044,27 +1751,15 @@ class MultiFactorQuintileBacktestEngineV2:
                 total_mono_checks += 1
                 if passed:
                     total_mono_pass += 1
-                if bi < len(active_batches):
-                    bname = active_batches[bi]['name']
-                    batch_mono_stats[bname]['total'] += 1
-                    batch_mono_stats[bname]['pass'] += 1
         
         total_mono_rate = round(total_mono_pass / total_mono_checks * 100, 1) if total_mono_checks > 0 else 0
-        
-        # 生成各批次单调性表格行
-        mono_table_rows = ""
-        for b in active_batches:
-            bname = b['name']
-            stats = batch_mono_stats[bname]
-            rate = round(stats['pass'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
-            mono_table_rows += f"<tr><td>{bname}</td><td>{stats['total']}</td><td>{stats['pass']}</td><td>{rate}%</td></tr>\n"
         
         # 生成各轮次性能对比表行
         perf_table_rows = ""
         for idx, r in enumerate(round_stats):
             rid = r['round_id']
             factors = r['factors']
-            factor_str = ', '.join([f"{cat}_alpha_{fid:03d}" for cat, fid in factors])
+            factor_str = ', '.join([f"{source}_{fid:03d}" for source, fid in factors])
             q1_ret = round(float(r['avg_performance']['Q1_top']['annual_return']) * 100, 2)
             q5_ret = round(float(r['avg_performance']['Q5_bottom']['annual_return']) * 100, 2)
             ls_ret = round(float(r['avg_performance']['long_short']['annual_return']) * 100, 2)
@@ -1163,7 +1858,7 @@ class MultiFactorQuintileBacktestEngineV2:
         </div>
         
         <div class="section">
-            <h2>各批次分层收益热力图</h2>
+            <h2>各轮次分层收益热力图</h2>
             <div id="heatmapChart" class="heatmap-container"></div>
             <p class="legend">颜色说明: 绿色=正收益, 红色=负收益, 颜色越深绝对值越大</p>
         </div>
@@ -1206,11 +1901,6 @@ class MultiFactorQuintileBacktestEngineV2:
                     <div class="card-label">总通过率</div>
                 </div>
             </div>
-            <h3 style="color:#666;">按批次统计</h3>
-            <table>
-                <tr><th>批次</th><th>检验次数</th><th>通过次数</th><th>通过率</th></tr>
-                {mono_table_rows}
-            </table>
         </div>
     </div>
     
@@ -1230,7 +1920,7 @@ class MultiFactorQuintileBacktestEngineV2:
             ]
         }});
         
-        // 热力图: 各批次 × 各分组的平均年化收益
+        // 热力图: 各轮次 × 各分组的年化收益
         var heatmapChart = echarts.init(document.getElementById('heatmapChart'));
         heatmapChart.setOption({{
             tooltip: {{
@@ -1240,7 +1930,7 @@ class MultiFactorQuintileBacktestEngineV2:
                 }}
             }},
             grid: {{ left: '12%', right: '15%', bottom: '10%', top: '5%' }},
-            xAxis: {{ type: 'category', data: {js_batch_labels}, splitArea: {{ show: true }} }},
+            xAxis: {{ type: 'category', data: {js_round_labels_for_heatmap}, splitArea: {{ show: true }} }},
             yAxis: {{ type: 'category', data: {js_quintile_labels}, splitArea: {{ show: true }} }},
             visualMap: {{
                 min: -30, max: 30, calculable: true, orient: 'vertical', right: '2%', top: 'center',

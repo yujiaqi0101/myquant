@@ -130,6 +130,11 @@ class MultiFactorBacktester:
         initial_capital: float = 1_000_000,
         seed: Optional[int] = None,
         max_stocks: int = 500,
+        rebalance_mode: str = 'fixed_days',
+        rebalance_price: str = 'close',
+        hold_days: int = 5,
+        calendar_freq: str = 'monthly',
+        calendar_n: int = 1,
     ):
         """
         初始化回测引擎
@@ -147,11 +152,28 @@ class MultiFactorBacktester:
         max_stocks : int
             股票池最大数量，按成交额筛选流动性最好的N只股票。
             设为0表示不限制（使用全量股票，注意内存）。
+        rebalance_mode : str
+            调仓模式: 'fixed_days' (固定交易日间隔) 或 'calendar' (日历周期)
+        rebalance_price : str
+            调仓价格: 'close' (收盘价) 或 'next_open' (次日开盘价)
+        hold_days : int
+            固定调仓模式下的持仓天数，默认5个交易日
+        calendar_freq : str
+            日历调仓频率: 'monthly' | 'weekly' | 'quarterly' | 'yearly'
+        calendar_n : int
+            日历调仓周期倍数，默认1 (如 monthly + 1 = 每月调仓)
         """
         self.db_path = db_path
         self.report_dir = Path(report_dir)
         self.initial_capital = initial_capital
         self.max_stocks = max_stocks
+
+        # 调仓策略参数
+        self.rebalance_mode = rebalance_mode
+        self.rebalance_price = rebalance_price
+        self.hold_days = hold_days
+        self.calendar_freq = calendar_freq
+        self.calendar_n = calendar_n
 
         if seed is not None:
             random.seed(seed)
@@ -170,6 +192,12 @@ class MultiFactorBacktester:
         logger.info(f"  数据库: {db_path}")
         logger.info(f"  报告目录: {self.report_dir}")
         logger.info(f"  股票池上限: {max_stocks}")
+        logger.info(f"  调仓模式: {rebalance_mode}")
+        logger.info(f"  调仓价格: {rebalance_price}")
+        if rebalance_mode == 'fixed_days':
+            logger.info(f"  持仓天数: {hold_days}")
+        else:
+            logger.info(f"  日历频率: {calendar_freq}, 周期: {calendar_n}")
 
     # ==================== 数据加载 ====================
 
@@ -337,6 +365,80 @@ class MultiFactorBacktester:
                     f"({valid_count/total_count*100:.1f}%)")
         return combined
 
+    # ==================== 调仓日期生成 ====================
+
+    def get_rebalance_dates(
+        self,
+        trade_dates: pd.DatetimeIndex,
+        start_date: Optional[pd.Timestamp] = None,
+        end_date: Optional[pd.Timestamp] = None,
+    ) -> List[pd.Timestamp]:
+        """
+        根据调仓策略生成调仓日期列表
+
+        Parameters
+        ----------
+        trade_dates : pd.DatetimeIndex
+            所有交易日列表
+        start_date : pd.Timestamp, optional
+            回测开始日期，默认为第一个交易日
+        end_date : pd.Timestamp, optional
+            回测结束日期，默认为最后一个交易日
+
+        Returns
+        -------
+        List[pd.Timestamp]
+            调仓日期列表
+        """
+        if start_date is None:
+            start_date = trade_dates[0]
+        if end_date is None:
+            end_date = trade_dates[-1]
+
+        # 过滤在回测区间内的交易日
+        mask = (trade_dates >= start_date) & (trade_dates <= end_date)
+        valid_dates = trade_dates[mask]
+
+        if len(valid_dates) == 0:
+            return []
+
+        rebalance_dates = []
+
+        if self.rebalance_mode == 'fixed_days':
+            # 固定交易日间隔模式：每 hold_days 个交易日调仓
+            for i in range(0, len(valid_dates), self.hold_days):
+                rebalance_dates.append(valid_dates[i])
+
+        elif self.rebalance_mode == 'calendar':
+            # 日历周期模式
+            current_date = valid_dates[0]
+            end = valid_dates[-1]
+
+            while current_date <= end:
+                rebalance_dates.append(current_date)
+
+                # 计算下一个调仓日期
+                if self.calendar_freq == 'weekly':
+                    next_date = current_date + pd.DateOffset(weeks=self.calendar_n)
+                elif self.calendar_freq == 'monthly':
+                    next_date = current_date + pd.DateOffset(months=self.calendar_n)
+                elif self.calendar_freq == 'quarterly':
+                    next_date = current_date + pd.DateOffset(months=3 * self.calendar_n)
+                elif self.calendar_freq == 'yearly':
+                    next_date = current_date + pd.DateOffset(years=self.calendar_n)
+                else:
+                    raise ValueError(f"不支持的日历频率: {self.calendar_freq}")
+
+                # 找到最近的交易日（向后查找）
+                future_dates = valid_dates[valid_dates >= next_date]
+                if len(future_dates) == 0:
+                    break
+                current_date = future_dates[0]
+        else:
+            raise ValueError(f"不支持的调仓模式: {self.rebalance_mode}")
+
+        return rebalance_dates
+
     # ==================== 单次回测 ====================
 
     def _run_single_backtest(
@@ -359,7 +461,7 @@ class MultiFactorBacktester:
         n_stocks : int
             持仓股票数
         rebalance_freq : int
-            调仓频率
+            调仓频率（在fixed_days模式下使用，calendar模式下忽略）
         long_short : bool
             是否多空策略
 
@@ -374,6 +476,25 @@ class MultiFactorBacktester:
                 price_data = price_data.copy()
                 price_data['stock_code'] = price_data.index.get_level_values('stock_code')
 
+            # 获取交易日列表用于生成调仓日期
+            trade_dates = price_data.index.get_level_values('trade_date').unique().sort_values()
+
+            # 根据调仓策略生成调仓日期
+            if self.rebalance_mode == 'fixed_days':
+                # 使用传入的 rebalance_freq 作为 hold_days
+                original_hold_days = self.hold_days
+                self.hold_days = rebalance_freq
+                rebalance_dates = self.get_rebalance_dates(trade_dates)
+                self.hold_days = original_hold_days
+            else:
+                rebalance_dates = self.get_rebalance_dates(trade_dates)
+
+            if not rebalance_dates:
+                logger.warning("    没有生成有效的调仓日期")
+                return None
+
+            logger.info(f"    调仓策略: {self.rebalance_mode}, 调仓日期数: {len(rebalance_dates)}")
+
             bt = Backtester(initial_capital=self.initial_capital)
             bt.load_data(price_data)
             result = bt.run_backtest(
@@ -381,6 +502,8 @@ class MultiFactorBacktester:
                 n_stocks=n_stocks,
                 rebalance_freq=rebalance_freq,
                 long_short=long_short,
+                rebalance_dates=rebalance_dates,
+                rebalance_price=self.rebalance_price,
             )
             return result
         except Exception as e:
@@ -627,13 +750,20 @@ class MultiFactorBacktester:
             val_perf = result['val_performance']
             params = result['params']
 
-            # 构建详细信息
+            # 构建详细信息，包含调仓策略参数
             details = {
                 'batch_idx': result['batch_idx'],
                 'batch_label': result['batch_label'],
                 'is_multi': result['is_multi'],
                 'multi_factor_ids': result['multi_factor_ids'],
                 'val_performance': val_perf,
+                'rebalance_strategy': {
+                    'rebalance_mode': self.rebalance_mode,
+                    'rebalance_price': self.rebalance_price,
+                    'hold_days': self.hold_days,
+                    'calendar_freq': self.calendar_freq,
+                    'calendar_n': self.calendar_n,
+                },
             }
 
             log_id = self.db.log_execution(

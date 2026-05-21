@@ -512,16 +512,42 @@ def run_factor_detail(db_path: str, factor_id: str):
 
 def run_quintile_backtest(args, db_path: str):
     """运行多因子分层回测V2"""
+    # 日期格式转换: YYYYMMDD -> YYYY-MM-DD
+    start_date = None
+    end_date = None
+    if args.start_date:
+        start_date = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:]}"
+    if args.end_date:
+        end_date = f"{args.end_date[:4]}-{args.end_date[4:6]}-{args.end_date[6:]}"
+
+    # 因子列表解析: 'WQ_001,GTJ_030' -> ['wq_001', 'gtj_030']
+    specified_factors = None
+    if args.factors:
+        specified_factors = [f.strip().lower() for f in args.factors.split(',')]
+
     output_dir = args.output_dir or str(project_root / 'reports' / 'backtest' / 'quintile')
     engine = MultiFactorQuintileBacktestEngineV2(
         db_path=db_path,
         output_dir=output_dir,
         n_rounds=args.n_rounds,
         n_stocks=args.bt_n_stocks,
-        rebalance_freq=args.rebalance_freq,
         seed=args.seed,
-        batch_start=args.batch_start,
-        batch_end=args.batch_end,
+        # 时间段
+        start_date=start_date,
+        end_date=end_date,
+        # 因子选择
+        factor_mode=args.factor_mode,
+        factors_per_category=args.factors_per_category,
+        specified_factors=specified_factors,
+        n_factors=args.n_factors,
+        # 权重方法
+        weight_method=args.weight_method,
+        # 调仓策略
+        rebalance_mode=args.rebalance_mode,
+        rebalance_price=args.rebalance_price,
+        hold_days=args.hold_days,
+        calendar_freq=args.calendar_freq,
+        calendar_n=args.calendar_n,
     )
     engine.run_all_rounds()
 
@@ -530,11 +556,29 @@ def run_multi_factor_backtest(args, db_path: str):
     """运行多因子分批回测V1"""
     from pathlib import Path as P
     report_dir = str(P(db_path).parent.parent / 'reports' / 'backtest')
+
+    # 日期格式转换: YYYYMMDD -> YYYY-MM-DD
+    start_date = None
+    end_date = None
+    if args.start_date:
+        start_date = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:]}"
+    if args.end_date:
+        end_date = f"{args.end_date[:4]}-{args.end_date[4:6]}-{args.end_date[6:]}"
+
     engine = MultiFactorBacktester(
         db_path=db_path,
         report_dir=report_dir,
         seed=args.seed,
         max_stocks=args.max_stocks,
+        # 时间段
+        start_date=start_date,
+        end_date=end_date,
+        # 调仓策略
+        rebalance_mode=args.rebalance_mode,
+        rebalance_price=args.rebalance_price,
+        hold_days=args.hold_days,
+        calendar_freq=args.calendar_freq,
+        calendar_n=args.calendar_n,
     )
     engine.run_all()
     report_path = engine.generate_summary_report()
@@ -581,18 +625,43 @@ def main():
                         help='回测轮数 (默认20)')
     parser.add_argument('--bt-n-stocks', type=int, default=50,
                         help='回测分组股票数 (默认50)')
-    parser.add_argument('--rebalance-freq', type=int, default=5,
-                        help='调仓频率/交易日 (默认5)')
     parser.add_argument('--seed', type=int, default=None,
                         help='随机种子 (默认None)')
     parser.add_argument('--output-dir', default=None,
                         help='报告输出目录 (默认reports/backtest/quintile)')
     parser.add_argument('--max-stocks', type=int, default=500,
                         help='V1回测股票池上限 (默认500)')
-    parser.add_argument('--batch-start', type=int, default=1,
-                        help='起始批次编号 (默认1)')
-    parser.add_argument('--batch-end', type=int, default=7,
-                        help='结束批次编号 (默认7)')
+
+    # V2 引擎参数 - 因子选择
+    parser.add_argument('--factor-mode', default='category',
+                        choices=['category', 'specified', 'random'],
+                        help='因子选择模式 (默认category)')
+    parser.add_argument('--factors-per-category', type=int, default=1,
+                        help='每类因子选择数量 (默认1)')
+    parser.add_argument('--factors', default=None,
+                        help='指定因子，如 WQ_001,GTJ_030')
+    parser.add_argument('--n-factors', type=int, default=4,
+                        help='随机模式下的因子数量 (默认4)')
+
+    # V2 引擎参数 - 权重方法
+    parser.add_argument('--weight-method', default='risk_parity',
+                        choices=['equal', 'risk_parity', 'ic_weighted', 'ir_weighted'],
+                        help='因子权重方法 (默认risk_parity)')
+
+    # V2 引擎参数 - 调仓策略
+    parser.add_argument('--rebalance-mode', default='fixed_days',
+                        choices=['fixed_days', 'calendar'],
+                        help='调仓模式 (默认fixed_days)')
+    parser.add_argument('--rebalance-price', default='close',
+                        choices=['close', 'next_open'],
+                        help='调仓价格类型 (默认close)')
+    parser.add_argument('--hold-days', type=int, default=5,
+                        help='固定持仓天数 (默认5)')
+    parser.add_argument('--calendar-freq', default=None,
+                        choices=['monthly', 'weekly', 'quarterly', 'yearly'],
+                        help='日历调仓频率')
+    parser.add_argument('--calendar-n', type=int, default=1,
+                        help='日历调仓间隔 (默认1)')
 
     args = parser.parse_args()
 
