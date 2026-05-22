@@ -723,6 +723,14 @@ def main():
 
     args = parser.parse_args()
 
+    # 无参数时显示帮助信息
+    if args.command is None and not any([
+        args.source, args.sync, args.validate, args.generate_test_data,
+        args.list_factors, args.quintile_backtest, args.multi_factor_backtest,
+    ]):
+        parser.print_help()
+        return
+
     # 处理子命令
     if args.command == 'strategy':
         run_strategy_command(args)
