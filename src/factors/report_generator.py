@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 
 from pyecharts import options as opts
-from pyecharts.charts import Line, Bar, Grid
+from pyecharts.charts import Line, Bar, Grid, Pie
 from pyecharts.commons.utils import JsCode
 
 
@@ -29,12 +29,14 @@ class BacktestReportGenerator:
         - portfolio_values: pd.DataFrame, 净值曲线数据
         - performance: Dict, 绩效指标
         - trade_records: List[Dict], 交易记录
+        - risk_report: Dict, 风控报告（可选）
     """
     
     def __init__(self, backtest_result: Dict):
         self.portfolio_df = backtest_result.get('portfolio_values', pd.DataFrame())
         self.performance = backtest_result.get('performance', {})
         self.trade_records = backtest_result.get('trade_records', [])
+        self.risk_report = backtest_result.get('risk_report', None)
         
         # 计算回撤曲线
         self._calculate_drawdown()
@@ -335,7 +337,196 @@ class BacktestReportGenerator:
                 </tbody>
             </table>
         </div>
+        </div>
+        """
+    
+    def _format_risk_summary_cards(self) -> str:
+        """生成风控摘要卡片 HTML"""
+        if not self.risk_report or self.risk_report.get('total_events', 0) == 0:
+            return ""
+        
+        total_events = self.risk_report.get('total_events', 0)
+        events_by_type = self.risk_report.get('events_by_type', {})
+        events_by_action = self.risk_report.get('events_by_action', {})
+        
+        stop_loss_count = events_by_type.get('stop_loss', 0)
+        take_profit_count = events_by_type.get('take_profit', 0)
+        portfolio_stop_count = events_by_type.get('portfolio_stop', 0)
+        position_limit_count = events_by_type.get('position_limit', 0)
+        
+        return f"""
+        <div style="display: flex; gap: 20px; margin-bottom: 20px;">
+            <div style="flex: 1; background: linear-gradient(135deg, #f4433615, #f4433605); 
+                        padding: 20px; border-radius: 12px; border-left: 4px solid #f44336;">
+                <div style="color: #666; font-size: 14px; margin-bottom: 5px;">止损触发</div>
+                <div style="font-size: 28px; font-weight: bold; color: #f44336;">{stop_loss_count}</div>
+            </div>
+            <div style="flex: 1; background: linear-gradient(135deg, #4caf5015, #4caf5005); 
+                        padding: 20px; border-radius: 12px; border-left: 4px solid #4caf50;">
+                <div style="color: #666; font-size: 14px; margin-bottom: 5px;">止盈触发</div>
+                <div style="font-size: 28px; font-weight: bold; color: #4caf50;">{take_profit_count}</div>
+            </div>
+            <div style="flex: 1; background: linear-gradient(135deg, #ff980015, #ff980005); 
+                        padding: 20px; border-radius: 12px; border-left: 4px solid #ff9800;">
+                <div style="color: #666; font-size: 14px; margin-bottom: 5px;">组合止损</div>
+                <div style="font-size: 28px; font-weight: bold; color: #ff9800;">{portfolio_stop_count}</div>
+            </div>
+            <div style="flex: 1; background: linear-gradient(135deg, #9c27b015, #9c27b005); 
+                        padding: 20px; border-radius: 12px; border-left: 4px solid #9c27b0;">
+                <div style="color: #666; font-size: 14px; margin-bottom: 5px;">仓位超限</div>
+                <div style="font-size: 28px; font-weight: bold; color: #9c27b0;">{position_limit_count}</div>
+            </div>
+        </div>
+        """
+    
+    def _format_risk_events_table(self, max_rows: int = 50) -> str:
+        """生成风控事件明细表格 HTML"""
+        if not self.risk_report or not self.risk_report.get('recent_events'):
+            return "<p>无风控事件记录</p>"
+        
+        events = self.risk_report.get('recent_events', [])[:max_rows]
+        
+        # 定义风控类型和操作的中文映射
+        type_mapping = {
+            'stop_loss': '止损',
+            'take_profit': '止盈',
+            'portfolio_stop': '组合止损',
+            'position_limit': '仓位超限',
+            'volatility_control': '波动率控制'
+        }
+        
+        action_mapping = {
+            'close': '清仓',
+            'reduce': '减仓',
+            'halt': '暂停交易',
+            'none': '无操作'
+        }
+        
+        rows = []
+        for event in events:
+            date = str(event.get('date', ''))[:10]
+            event_type = type_mapping.get(event.get('type', ''), event.get('type', ''))
+            stock = event.get('stock', 'N/A')
+            trigger = event.get('trigger', 0)
+            action = action_mapping.get(event.get('action', ''), event.get('action', ''))
+            reason = event.get('reason', '')
+            
+            # 类型颜色
+            type_colors = {
+                '止损': '#f44336',
+                '止盈': '#4caf50',
+                '组合止损': '#ff9800',
+                '仓位超限': '#9c27b0',
+                '波动率控制': '#2196f3'
+            }
+            type_color = type_colors.get(event_type, '#666')
+            
+            rows.append(f"""
+                <tr>
+                    <td style="padding: 8px; border-bottom: 1px solid #eee;">{date}</td>
+                    <td style="padding: 8px; border-bottom: 1px solid #eee;">
+                        <span style="background: {type_color}20; color: {type_color}; padding: 2px 8px; border-radius: 4px; font-size: 12px;">
+                            {event_type}
+                        </span>
+                    </td>
+                    <td style="padding: 8px; border-bottom: 1px solid #eee;">{stock}</td>
+                    <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; color: {'red' if trigger < 0 else 'green'};">
+                        {trigger:.2%}
+                    </td>
+                    <td style="padding: 8px; border-bottom: 1px solid #eee;">{action}</td>
+                    <td style="padding: 8px; border-bottom: 1px solid #eee; color: #666; font-size: 12px;">{reason}</td>
+                </tr>
+            """)
+        
+        total = self.risk_report.get('total_events', 0)
+        more_info = f"<p style='color: #666; margin-top: 10px;'>显示前 {len(events)} 条记录，共 {total} 条</p>" if total > max_rows else ""
+        
+        return f"""
+        <div style="max-height: 350px; overflow-y: auto;">
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="background-color: #f5f5f5; position: sticky; top: 0;">
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">日期</th>
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">风控类型</th>
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">股票代码</th>
+                        <th style="padding: 10px; text-align: right; border-bottom: 2px solid #ddd;">触发值</th>
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">执行操作</th>
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">触发原因</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(rows)}
+                </tbody>
+            </table>
+        </div>
         {more_info}
+        """
+    
+    def _create_risk_pie_chart(self) -> Pie:
+        """创建风控事件类型分布饼图"""
+        if not self.risk_report or self.risk_report.get('total_events', 0) == 0:
+            return None
+        
+        events_by_type = self.risk_report.get('events_by_type', {})
+        
+        # 定义风控类型的中文映射和颜色
+        type_mapping = {
+            'stop_loss': ('止损', '#f44336'),
+            'take_profit': ('止盈', '#4caf50'),
+            'portfolio_stop': ('组合止损', '#ff9800'),
+            'position_limit': ('仓位超限', '#9c27b0'),
+            'volatility_control': ('波动率控制', '#2196f3')
+        }
+        
+        data = []
+        for key, (name, color) in type_mapping.items():
+            count = events_by_type.get(key, 0)
+            if count > 0:
+                data.append(opts.PieItem(name=name, value=count))
+        
+        if not data:
+            return None
+        
+        pie = (
+            Pie(init_opts=opts.InitOpts(width="400px", height="250px", theme="light"))
+            .add(
+                "风控事件",
+                data,
+                radius=["30%", "60%"],
+                label_opts=opts.LabelOpts(formatter="{b}: {c} ({d}%)"),
+            )
+            .set_colors([color for _, color in type_mapping.values()])
+            .set_global_opts(
+                title_opts=opts.TitleOpts(title="风控事件分布", pos_left="center"),
+                legend_opts=opts.LegendOpts(pos_left="left", orient="vertical"),
+            )
+        )
+        return pie
+    
+    def _format_risk_report(self) -> str:
+        """生成完整风控报告 HTML"""
+        if not self.risk_report or self.risk_report.get('total_events', 0) == 0:
+            return ""
+        
+        # 生成饼图
+        pie_chart = self._create_risk_pie_chart()
+        pie_html = pie_chart.render_embed() if pie_chart else ""
+        
+        return f"""
+        <!-- 风控报告 -->
+        <div class="section">
+            <div class="section-title">🛡️ 风控报告</div>
+            {self._format_risk_summary_cards()}
+            
+            <div style="display: flex; gap: 20px; margin-top: 20px;">
+                <div style="flex: 1;">
+                    {pie_html}
+                </div>
+            </div>
+            
+            <h4 style="margin-top: 20px; margin-bottom: 10px;">风控事件明细</h4>
+            {self._format_risk_events_table()}
+        </div>
         """
     
     def _format_trade_statistics(self) -> str:
@@ -533,6 +724,9 @@ class BacktestReportGenerator:
             <div class="section-title">📊 交易统计</div>
             {self._format_trade_statistics()}
         </div>
+        
+        <!-- 风控报告 -->
+        {self._format_risk_report()}
         
         <!-- 交易记录 -->
         <div class="section">

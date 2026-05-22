@@ -10,6 +10,7 @@
 - 5组分层回测（Q1-Q5及多空组合）
 - 每轮生成HTML报告
 - 按需加载数据（避免内存溢出）
+- 集成实时风控（止损/止盈/仓位限制）
 """
 
 import os
@@ -25,6 +26,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+
+# 导入风控控制器
+from src.risk import RiskController, RiskAction
 
 # 配置日志
 logging.basicConfig(
@@ -517,7 +521,8 @@ def combine_factors(factors_dict: Dict[str, pd.Series], weights: Dict[str, float
 def _calc_group_nav(holdings: Dict[str, set], close_pivot: pd.DataFrame,
                     trade_dates: list, rebalance_dates_set: set,
                     initial_capital: float = 1000000.0,
-                    commission_rate: float = 0.0003) -> pd.DataFrame:
+                    commission_rate: float = 0.0003,
+                    risk_controller: 'RiskController' = None) -> pd.DataFrame:
     """
     计算某个分组的净值曲线。
 
@@ -538,11 +543,14 @@ def _calc_group_nav(holdings: Dict[str, set], close_pivot: pd.DataFrame,
         初始资金
     commission_rate : float
         佣金费率
+    risk_controller : RiskController, optional
+        风控控制器，用于实时监控和执行风控规则
     """
     nav = initial_capital
     nav_list = []  # 用 list 比 dict 更省内存
 
     current_positions = {}  # stock_code -> shares
+    entry_prices = {}  # stock_code -> entry_price (用于风控计算)
 
     for date in trade_dates:
         if date not in close_pivot.index:
@@ -560,6 +568,64 @@ def _calc_group_nav(holdings: Dict[str, set], close_pivot: pd.DataFrame,
         total_value = nav + position_value
         nav_list.append((date, total_value))
 
+        # 风控检查（非调仓日也检查）
+        if risk_controller and current_positions:
+            date_str = date.strftime('%Y-%m-%d')
+
+            # 检查组合层面风控
+            action, target_position, reason = risk_controller.check_portfolio_risk(
+                date_str, total_value, position_value / total_value if total_value > 0 else 0
+            )
+
+            if action != RiskAction.NONE:
+                # 组合风控触发，清仓或减仓
+                if action == RiskAction.CLOSE:
+                    for stock_code, shares in list(current_positions.items()):
+                        if stock_code in close_pivot.columns:
+                            price = close_pivot.at[date, stock_code]
+                            if pd.notna(price) and price > 0:
+                                sell_value = shares * price
+                                commission = sell_value * commission_rate
+                                nav += sell_value - commission
+                                risk_controller.record_exit(stock_code)
+                        del current_positions[stock_code]
+                    entry_prices.clear()
+                    continue  # 跳过当日调仓
+
+            # 检查个股风控
+            for stock_code, shares in list(current_positions.items()):
+                if stock_code not in close_pivot.columns:
+                    continue
+
+                price = close_pivot.at[date, stock_code]
+                if pd.isna(price) or price <= 0:
+                    continue
+
+                position_ratio = (shares * price) / total_value if total_value > 0 else 0
+
+                action, target_position, reason = risk_controller.check_stock_risk(
+                    date_str, stock_code, price, position_ratio
+                )
+
+                if action == RiskAction.CLOSE:
+                    # 清仓
+                    sell_value = shares * price
+                    commission = sell_value * commission_rate
+                    nav += sell_value - commission
+                    del current_positions[stock_code]
+                    entry_prices.pop(stock_code, None)
+                    risk_controller.record_exit(stock_code)
+
+                elif action == RiskAction.REDUCE:
+                    # 减仓
+                    target_shares = int((target_position * total_value / price) / 100) * 100
+                    if target_shares < shares:
+                        reduce_shares = shares - target_shares
+                        sell_value = reduce_shares * price
+                        commission = sell_value * commission_rate
+                        nav += sell_value - commission
+                        current_positions[stock_code] = target_shares
+
         # 调仓日：换仓
         if date in rebalance_dates_set:
             # 卖出旧持仓
@@ -571,6 +637,8 @@ def _calc_group_nav(holdings: Dict[str, set], close_pivot: pd.DataFrame,
                         commission = sell_value * commission_rate
                         nav += sell_value - commission
                 del current_positions[stock_code]
+                risk_controller.record_exit(stock_code) if risk_controller else None
+            entry_prices.clear()
 
             # 买入新持仓
             date_holdings = holdings.get(date)
@@ -599,6 +667,11 @@ def _calc_group_nav(holdings: Dict[str, set], close_pivot: pd.DataFrame,
                     commission = buy_value * commission_rate
                     nav -= buy_value + commission
                     current_positions[stock_code] = shares
+                    entry_prices[stock_code] = price
+                    # 记录买入成本用于风控
+                    if risk_controller:
+                        date_str = date.strftime('%Y-%m-%d')
+                        risk_controller.record_entry(date_str, stock_code, price, shares * price / (nav + shares * price))
 
     return pd.DataFrame(nav_list, columns=['date', 'nav'])
 
@@ -789,8 +862,8 @@ class MultiFactorQuintileBacktestEngineV2:
     支持自定义时间段、多种因子选择模式、权重方法和调仓策略
     """
     
-    def __init__(self, 
-                 db_path: str = None, 
+    def __init__(self,
+                 db_path: str = None,
                  output_dir: str = None,
                  # 时间段参数
                  start_date: str = '2020-01-01',
@@ -812,10 +885,17 @@ class MultiFactorQuintileBacktestEngineV2:
                  hold_days: int = 5,                   # fixed_days 模式下持仓天数
                  calendar_freq: str = 'month',         # calendar 模式下: 'week', 'month', 'quarter', 'year'
                  calendar_n: int = 1,                  # calendar 模式下: 第N个交易日
+                 # 风控参数
+                 enable_risk_control: bool = False,    # 是否启用风控
+                 stop_loss: float = 0.07,              # 个股止损比例 (-7%)
+                 take_profit: float = 0.20,            # 个股止盈比例 (+20%)
+                 portfolio_stop: float = 0.10,         # 组合止损比例 (-10%)
+                 max_position_per_stock: float = 0.10, # 单股最大仓位 (10%)
+                 risk_action: str = 'close',           # 风控操作: 'close', 'reduce', 'halt'
                  ):
         """
         初始化多因子分层回测引擎 V2
-        
+
         Parameters
         ----------
         db_path : str
@@ -852,32 +932,68 @@ class MultiFactorQuintileBacktestEngineV2:
             calendar 模式下: 'week', 'month', 'quarter', 'year'
         calendar_n : int
             calendar 模式下每月/周/季度/年第N个交易日
+        enable_risk_control : bool
+            是否启用实时风控，默认False
+        stop_loss : float
+            个股止损比例，默认0.07（-7%）
+        take_profit : float
+            个股止盈比例，默认0.20（+20%）
+        portfolio_stop : float
+            组合止损比例，默认0.10（-10%）
+        max_position_per_stock : float
+            单只股票最大仓位，默认0.10（10%）
+        risk_action : str
+            风控触发后的操作：'close'(清仓), 'reduce'(减仓), 'halt'(暂停)
         """
         self.db_path = db_path or r'e:\python_space\myquant\data\aquant.db'
         self.n_rounds = n_rounds
         self.n_stocks = n_stocks
-        
+
         # 时间段参数（设置默认值）
         self.start_date = start_date or '2017-01-01'
         self.end_date = end_date or datetime.now().strftime('%Y-%m-%d')
         # 计算预热期起始日（向前推375个自然日，约250个交易日）
         self.warmup_start = (pd.Timestamp(self.start_date) - timedelta(days=375)).strftime('%Y-%m-%d')
-        
+
         # 因子选择参数
         self.factor_mode = factor_mode
         self.factor_per_category = factor_per_category
         self.specified_factors = specified_factors or []
         self.n_random_factors = n_random_factors
-        
+
         # 权重参数
         self.weight_method = weight_method
-        
+
         # 调仓策略参数
         self.rebalance_mode = rebalance_mode
         self.rebalance_price = rebalance_price
         self.hold_days = hold_days
         self.calendar_freq = calendar_freq
         self.calendar_n = calendar_n
+
+        # 风控参数
+        self.enable_risk_control = enable_risk_control
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        self.portfolio_stop = portfolio_stop
+        self.max_position_per_stock = max_position_per_stock
+        self.risk_action = risk_action
+
+        # 初始化风控控制器
+        self.risk_controller = None
+        if enable_risk_control:
+            self.risk_controller = RiskController(
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                portfolio_stop=portfolio_stop,
+                max_position_per_stock=max_position_per_stock,
+                risk_action=risk_action,
+                enable_stop_loss=True,
+                enable_take_profit=True,
+                enable_portfolio_stop=True,
+                enable_position_limit=True,
+            )
+            logger.info(f"风控控制器已启用: 止损={stop_loss:.1%}, 止盈={take_profit:.1%}, 组合止损={portfolio_stop:.1%}")
         
         # 生成回测ID（基于时间戳）
         self.backtest_id = f"bt_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -924,6 +1040,18 @@ class MultiFactorQuintileBacktestEngineV2:
         elif rebalance_mode == 'calendar':
             logger.info(f"  调仓频率: {calendar_freq}, 第 {calendar_n} 个交易日")
         logger.info(f"调仓价格: {rebalance_price}")
+
+        # 风控配置信息
+        if enable_risk_control:
+            logger.info(f"风控配置: 已启用")
+            logger.info(f"  个股止损: {stop_loss:.1%}")
+            logger.info(f"  个股止盈: {take_profit:.1%}")
+            logger.info(f"  组合止损: {portfolio_stop:.1%}")
+            logger.info(f"  单股最大仓位: {max_position_per_stock:.1%}")
+            logger.info(f"  风控操作: {risk_action}")
+        else:
+            logger.info(f"风控配置: 未启用")
+
         logger.info(f"=" * 70)
     
     def get_rebalance_dates(self, trade_dates: List[pd.Timestamp]) -> List[pd.Timestamp]:
@@ -1169,13 +1297,19 @@ class MultiFactorQuintileBacktestEngineV2:
         logger.info("    构建 close_pivot...")
         close_pivot = price_data['close'].unstack(level='stock_code')
         
+        # 重置风控控制器（每轮回测开始时）
+        if self.risk_controller:
+            self.risk_controller.reset()
+            logger.info(f"    风控控制器已重置")
+        
         # 计算每个quintile的净值曲线
         for qname in quintile_names:
             logger.info(f"    回测 {qname}...")
             
             nav_df = _calc_group_nav(
                 quintile_holdings[qname], close_pivot,
-                trade_dates, rebalance_dates_set
+                trade_dates, rebalance_dates_set,
+                risk_controller=self.risk_controller
             )
             
             performance = _calc_performance(nav_df)
@@ -1192,11 +1326,13 @@ class MultiFactorQuintileBacktestEngineV2:
         # 多空组合：Q1做多 + Q5做空
         q1_nav = _calc_group_nav(
             quintile_holdings['Q1_top'], close_pivot,
-            trade_dates, rebalance_dates_set
+            trade_dates, rebalance_dates_set,
+            risk_controller=self.risk_controller
         )
         q5_nav = _calc_group_nav(
             quintile_holdings['Q5_bottom'], close_pivot,
-            trade_dates, rebalance_dates_set
+            trade_dates, rebalance_dates_set,
+            risk_controller=self.risk_controller
         )
         
         if not q1_nav.empty and not q5_nav.empty:
@@ -1215,6 +1351,15 @@ class MultiFactorQuintileBacktestEngineV2:
         else:
             logger.warning("    多空组合数据为空，跳过")
             results['long_short'] = BacktestResult()
+        
+        # 收集风控报告（如果启用）
+        if self.risk_controller:
+            risk_report = self.risk_controller.get_risk_report()
+            results['risk_report'] = risk_report
+            logger.info(f"    风控事件统计: 总数={risk_report.get('total_events', 0)}")
+            events_by_type = risk_report.get('events_by_type', {})
+            for event_type, count in events_by_type.items():
+                logger.info(f"      - {event_type}: {count}")
         
         # 释放内存
         del quintile_holdings
@@ -1331,7 +1476,12 @@ class MultiFactorQuintileBacktestEngineV2:
                 'quintile_performance': {}
             }
             
+            # 只处理 BacktestResult 对象，跳过 risk_report 等其他键
             for quintile_name, result in quintile_results.items():
+                if quintile_name == 'risk_report':
+                    continue
+                if not hasattr(result, 'performance'):
+                    continue
                 perf = result.performance
                 batch_result['quintile_performance'][quintile_name] = {
                     'annual_return': perf.get('annual_return', 0),
@@ -1339,6 +1489,10 @@ class MultiFactorQuintileBacktestEngineV2:
                     'max_drawdown': perf.get('max_drawdown', 0),
                     'win_rate': perf.get('win_rate', 0),
                 }
+            
+            # 收集风控报告到 batch_result
+            if 'risk_report' in quintile_results:
+                batch_result['risk_report'] = quintile_results['risk_report']
             
             round_results['batches'].append(batch_result)
             
@@ -1378,6 +1532,140 @@ class MultiFactorQuintileBacktestEngineV2:
         logger.info(f"所有回测完成！")
         logger.info(f"报告目录: {self.output_dir}")
         logger.info(f"{'='*70}\n")
+    
+    def _generate_risk_report_section(self, batches: List[Dict]) -> str:
+        """生成风控报告 HTML 部分"""
+        # 从 batches 中查找风控报告
+        risk_report = None
+        for batch in batches:
+            if 'risk_report' in batch:
+                risk_report = batch['risk_report']
+                break
+        
+        if not risk_report or risk_report.get('total_events', 0) == 0:
+            return ""
+        
+        total_events = risk_report.get('total_events', 0)
+        events_by_type = risk_report.get('events_by_type', {})
+        
+        stop_loss_count = events_by_type.get('stop_loss', 0)
+        take_profit_count = events_by_type.get('take_profit', 0)
+        portfolio_stop_count = events_by_type.get('portfolio_stop', 0)
+        position_limit_count = events_by_type.get('position_limit', 0)
+        
+        # 类型映射和颜色
+        type_mapping = {
+            'stop_loss': ('止损', '#f44336'),
+            'take_profit': ('止盈', '#4caf50'),
+            'portfolio_stop': ('组合止损', '#ff9800'),
+            'position_limit': ('仓位超限', '#9c27b0'),
+        }
+        
+        action_mapping = {
+            'close': '清仓',
+            'reduce': '减仓',
+            'halt': '暂停交易',
+            'none': '无操作'
+        }
+        
+        # 生成事件明细行
+        event_rows = ""
+        recent_events = risk_report.get('recent_events', [])
+        for event in recent_events[:20]:  # 最多显示20条
+            date = str(event.get('date', ''))[:10]
+            event_type_key = event.get('type', '')
+            event_type_name, type_color = type_mapping.get(event_type_key, (event_type_key, '#666'))
+            stock = event.get('stock', 'N/A')
+            trigger = event.get('trigger', 0)
+            action = action_mapping.get(event.get('action', ''), event.get('action', ''))
+            reason = event.get('reason', '')
+            
+            trigger_color = 'color: red;' if trigger < 0 else 'color: green;'
+            
+            event_rows += f"""
+                <tr>
+                    <td>{date}</td>
+                    <td><span style="background: {type_color}20; color: {type_color}; padding: 2px 8px; border-radius: 4px; font-size: 12px;">{event_type_name}</span></td>
+                    <td>{stock}</td>
+                    <td style="{trigger_color}">{trigger:.2%}</td>
+                    <td>{action}</td>
+                    <td style="color: #666; font-size: 12px;">{reason}</td>
+                </tr>
+            """
+        
+        # 生成饼图数据
+        pie_data = []
+        for key, (name, color) in type_mapping.items():
+            count = events_by_type.get(key, 0)
+            if count > 0:
+                pie_data.append(f'{{name: "{name}", value: {count}}}')
+        pie_data_str = "[" + ", ".join(pie_data) + "]" if pie_data else "[]"
+        
+        return f"""
+        <div class="section">
+            <h2>🛡️ 风控报告</h2>
+            <div class="summary-grid">
+                <div class="summary-item" style="border-left: 4px solid #f44336;">
+                    <div class="value" style="color: #f44336;">{stop_loss_count}</div>
+                    <div class="label">止损触发</div>
+                </div>
+                <div class="summary-item" style="border-left: 4px solid #4caf50;">
+                    <div class="value" style="color: #4caf50;">{take_profit_count}</div>
+                    <div class="label">止盈触发</div>
+                </div>
+                <div class="summary-item" style="border-left: 4px solid #ff9800;">
+                    <div class="value" style="color: #ff9800;">{portfolio_stop_count}</div>
+                    <div class="label">组合止损</div>
+                </div>
+                <div class="summary-item" style="border-left: 4px solid #9c27b0;">
+                    <div class="value" style="color: #9c27b0;">{position_limit_count}</div>
+                    <div class="label">仓位超限</div>
+                </div>
+            </div>
+            
+            <div style="display: flex; gap: 20px; margin-top: 20px;">
+                <div style="flex: 1;">
+                    <div id="chart-risk" style="width: 100%; height: 250px;"></div>
+                </div>
+            </div>
+            
+            <h3 style="margin-top: 20px;">风控事件明细</h3>
+            <table>
+                <tr>
+                    <th>日期</th>
+                    <th>类型</th>
+                    <th>股票</th>
+                    <th>触发值</th>
+                    <th>操作</th>
+                    <th>原因</th>
+                </tr>
+                {event_rows}
+            </table>
+            <p style="margin-top: 10px; color: #666;">显示前 {min(20, len(recent_events))} 条记录，共 {total_events} 条风控事件</p>
+        </div>
+        
+        <script>
+            // 风控事件饼图
+            var chartRisk = echarts.init(document.getElementById('chart-risk'));
+            chartRisk.setOption({{
+                title: {{ text: '风控事件分布', left: 'center' }},
+                tooltip: {{ trigger: 'item', formatter: '{{b}}: {{c}} ({{d}}%)' }},
+                legend: {{ orient: 'vertical', left: 'left' }},
+                series: [{{
+                    name: '风控事件',
+                    type: 'pie',
+                    radius: ['30%', '60%'],
+                    data: {pie_data_str},
+                    itemStyle: {{
+                        color: function(params) {{
+                            var colorMap = {{'止损': '#f44336', '止盈': '#4caf50', '组合止损': '#ff9800', '仓位超限': '#9c27b0'}};
+                            return colorMap[params.name] || '#666';
+                        }}
+                    }}
+                }}]
+            }});
+        </script>
+        """
     
     def generate_round_report(self, round_result: Dict):
         """生成单轮HTML报告（增强版：净值曲线 + 详细绩效 + 单调性检验）"""
@@ -1425,6 +1713,9 @@ class MultiFactorQuintileBacktestEngineV2:
         js_q1_returns = str([float(b['quintile_performance'].get('Q1_top', {}).get('annual_return', 0) * 100) for b in batches])
         js_q5_returns = str([float(b['quintile_performance'].get('Q5_bottom', {}).get('annual_return', 0) * 100) for b in batches])
         js_ls_returns = str([float(b['quintile_performance'].get('long_short', {}).get('annual_return', 0) * 100) for b in batches])
+        
+        # 生成风控报告 HTML（在 f-string 之前生成）
+        risk_report_html = self._generate_risk_report_section(batches)
         
         html_content = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1595,6 +1886,9 @@ class MultiFactorQuintileBacktestEngineV2:
                 <strong>单调性通过率: {mono_pass_rate:.1%}</strong>
             </p>
         </div>
+        
+        # 风控报告部分
+        {risk_report_html}
         
         <div class="section">
             <h2>📝 回测说明</h2>

@@ -17,11 +17,13 @@ env/
 *~
 
 # 运行时生成的数据文件
-data/aquant.db
+data/
+!data/.gitkeep
 data/raw/
 data/processed/
 data/external/
 data/test_*.db
+*.db
 
 # 测试数据（可通过 python main.py --generate-test-data 重新生成）
 data/test_data/*.csv

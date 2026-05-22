@@ -338,6 +338,10 @@ def run_data_sync(db_path: str, account: str = None, password: str = None,
         print(f"QMT模块不可用: {e}")
         return
 
+    # end_date 为空时默认为当天
+    if not end_date:
+        end_date = pd.Timestamp.now().strftime('%Y%m%d')
+
     db = DatabaseManager(db_path)
 
     # 连接QMT
@@ -353,7 +357,7 @@ def run_data_sync(db_path: str, account: str = None, password: str = None,
     print("QMT连接成功")
 
     # 同步数据
-    print(f"\n开始同步数据 ({start_date} ~ {end_date or '最新'})...")
+    print(f"\n开始同步数据 ({start_date} ~ {end_date})...")
     synchronizer = DataSynchronizer(connector, db)
 
     def progress_cb(stage, current, total, message):
@@ -376,7 +380,7 @@ def run_data_sync(db_path: str, account: str = None, password: str = None,
     # 数据校验
     print(f"\n数据校验...")
     validator = DataValidator(db)
-    report = validator.validate_and_report(start_date, end_date or pd.Timestamp.now().strftime('%Y%m%d'))
+    report = validator.validate_and_report(start_date, end_date)
     print(report)
 
 
@@ -512,13 +516,17 @@ def run_factor_detail(db_path: str, factor_id: str):
 
 def run_quintile_backtest(args, db_path: str):
     """运行多因子分层回测V2"""
-    # 日期格式转换: YYYYMMDD -> YYYY-MM-DD
+    # 日期格式转换: 支持 YYYYMMDD 和 YYYY-MM-DD 两种格式
     start_date = None
     end_date = None
-    if args.start_date and len(args.start_date) == 8:
-        start_date = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:]}"
-    if args.end_date and len(args.end_date) == 8:
-        end_date = f"{args.end_date[:4]}-{args.end_date[4:6]}-{args.end_date[6:]}"
+    if args.start_date:
+        s = args.start_date.replace('-', '')
+        if len(s) == 8:
+            start_date = f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    if args.end_date:
+        e = args.end_date.replace('-', '')
+        if len(e) == 8:
+            end_date = f"{e[:4]}-{e[4:6]}-{e[6:]}"
 
     # 因子列表解析: 'WQ_001,GTJ_030' -> ['wq_001', 'gtj_030']
     specified_factors = None
@@ -548,6 +556,13 @@ def run_quintile_backtest(args, db_path: str):
         hold_days=args.hold_days,
         calendar_freq=args.calendar_freq,
         calendar_n=args.calendar_n,
+        # 风控配置
+        enable_risk_control=args.enable_risk,
+        stop_loss=args.stop_loss,
+        take_profit=args.take_profit,
+        portfolio_stop=args.portfolio_stop,
+        max_position_per_stock=args.max_position,
+        risk_action=args.risk_action,
     )
     engine.run_all_rounds()
 
@@ -557,13 +572,17 @@ def run_multi_factor_backtest(args, db_path: str):
     from pathlib import Path as P
     report_dir = str(P(db_path).parent.parent / 'reports' / 'backtest')
 
-    # 日期格式转换: YYYYMMDD -> YYYY-MM-DD
+    # 日期格式转换: 支持 YYYYMMDD 和 YYYY-MM-DD 两种格式
     start_date = None
     end_date = None
     if args.start_date:
-        start_date = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:]}"
+        s = args.start_date.replace('-', '')
+        if len(s) == 8:
+            start_date = f"{s[:4]}-{s[4:6]}-{s[6:]}"
     if args.end_date:
-        end_date = f"{args.end_date[:4]}-{args.end_date[4:6]}-{args.end_date[6:]}"
+        e = args.end_date.replace('-', '')
+        if len(e) == 8:
+            end_date = f"{e[:4]}-{e[4:6]}-{e[6:]}"
 
     engine = MultiFactorBacktester(
         db_path=db_path,
@@ -662,6 +681,21 @@ def main():
                         help='日历调仓频率')
     parser.add_argument('--calendar-n', type=int, default=1,
                         help='日历调仓间隔 (默认1)')
+
+    # V2 引擎参数 - 风控配置
+    parser.add_argument('--enable-risk', action='store_true',
+                        help='启用风控 (默认关闭)')
+    parser.add_argument('--stop-loss', type=float, default=0.07,
+                        help='个股止损比例 (默认0.07 = -7%%)')
+    parser.add_argument('--take-profit', type=float, default=0.20,
+                        help='个股止盈比例 (默认0.20 = +20%%)')
+    parser.add_argument('--portfolio-stop', type=float, default=0.10,
+                        help='组合止损比例 (默认0.10 = -10%%)')
+    parser.add_argument('--max-position', type=float, default=0.10,
+                        help='单股最大仓位 (默认0.10 = 10%%)')
+    parser.add_argument('--risk-action', default='close',
+                        choices=['close', 'reduce', 'halt'],
+                        help='风控触发后的操作 (默认close)')
 
     args = parser.parse_args()
 

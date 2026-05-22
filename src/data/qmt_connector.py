@@ -183,11 +183,12 @@ class QMTConnector:
         period: str = '1d',
         start_time: str = '',
         end_time: str = '',
-        dividend_type: str = 'front',
     ):
         """
         下载历史K线数据
 
+        注意：download_history_data 不支持复权参数，复权在 get_market_data_ex 中设置
+        
         Parameters
         ----------
         stock_list : list of str
@@ -198,8 +199,6 @@ class QMTConnector:
             开始时间，格式 'YYYYMMDD' 或 'YYYYMMDDHHmmss'
         end_time : str
             结束时间，格式 'YYYYMMDD' 或 'YYYYMMDDHHmmss'
-        dividend_type : str
-            复权类型: 'front'前复权, 'back'后复权, 'none'不复权
         """
         if not _XTQUANT_AVAILABLE:
             raise ImportError("xtquant 未安装，请先安装 xtquant 库")
@@ -209,7 +208,7 @@ class QMTConnector:
             for i, stock_code in enumerate(stock_list):
                 if i % 100 == 0:
                     logger.info(f"下载历史数据进度: {i}/{len(stock_list)}")
-                download_history_data(stock_code, period, start_time, end_time, dividend_type=dividend_type)
+                download_history_data(stock_code, period, start_time, end_time)
             logger.info(f"历史数据下载完成，共 {len(stock_list)} 只股票")
         except Exception as e:
             logger.error(f"下载历史数据失败: {e}")

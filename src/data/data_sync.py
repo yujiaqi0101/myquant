@@ -378,8 +378,7 @@ class DataSynchronizer:
         logger.info(f"开始下载 {len(index_codes)} 个指数的历史数据...")
         try:
             self.qmt.download_history_data(index_codes, period='1d',
-                                          start_time=start_date, end_time=end_date,
-                                          dividend_type='front')
+                                          start_time=start_date, end_time=end_date)
         except Exception as e:
             logger.warning(f"批量下载指数历史数据失败: {e}")
         logger.info("指数历史数据下载完成")
@@ -631,8 +630,7 @@ class DataSynchronizer:
         # 先下载所有股票的历史数据
         logger.info(f"开始下载 {total_stocks} 只股票的历史数据...")
         try:
-            self.qmt.download_history_data(stock_codes, period='1d', start_time=start_date, end_time=end_date,
-                                          dividend_type='front')
+            self.qmt.download_history_data(stock_codes, period='1d', start_time=start_date, end_time=end_date)
         except Exception as e:
             logger.warning(f"批量下载历史数据失败: {e}")
         logger.info("历史数据下载完成")

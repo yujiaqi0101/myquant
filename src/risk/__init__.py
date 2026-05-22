@@ -6,11 +6,21 @@
 - 行业分散度控制
 - 市值暴露控制
 - 过拟合检测
+- 实时风控控制器（止损/止盈/仓位限制）
 """
 
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
+
+# 导出风控控制器
+from .risk_controller import (
+    RiskController,
+    RiskAction,
+    RiskRuleType,
+    RiskRule,
+    RiskEvent,
+)
 
 
 class RiskManager:
