@@ -608,6 +608,30 @@ def run_multi_factor_backtest(args, db_path: str):
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='A股量化分析系统')
+    
+    # 创建子命令
+    subparsers = parser.add_subparsers(dest='command', help='可用命令')
+    
+    # 添加新的子命令
+    from src.cli import (
+        setup_strategy_parser, run_strategy_command,
+        setup_backtest_parser, run_backtest_command,
+        setup_result_parser, run_result_command,
+    )
+    
+    # strategy 子命令
+    strategy_parser = subparsers.add_parser('strategy', help='策略管理')
+    setup_strategy_parser(strategy_parser)
+    
+    # backtest 子命令
+    backtest_parser = subparsers.add_parser('backtest', help='运行回测')
+    setup_backtest_parser(backtest_parser)
+    
+    # result 子命令
+    result_parser = subparsers.add_parser('result', help='回测结果管理')
+    setup_result_parser(result_parser)
+    
+    # 原有参数（向后兼容）
     parser.add_argument('--source', choices=['test', 'real', 'database', 'mock'],
                         default=None,
                         help='数据模式: test=测试模式(优先数据库,可回退模拟), real=真实模式(仅数据库), database=同real (默认根据环境变量AQUANT_DATA_MODE)')
@@ -699,6 +723,17 @@ def main():
 
     args = parser.parse_args()
 
+    # 处理子命令
+    if args.command == 'strategy':
+        run_strategy_command(args)
+        return
+    elif args.command == 'backtest':
+        run_backtest_command(args)
+        return
+    elif args.command == 'result':
+        run_result_command(args)
+        return
+    
     # 数据模式设置
     if args.source == 'test':
         from config import config as config_module
