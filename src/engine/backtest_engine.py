@@ -179,9 +179,20 @@ class BacktestEngine:
             # ---- 阶段3：调用策略生成订单 ----
             orders = self.strategy.on_bar(context)
             
-            # ---- 阶段4：执行入场订单 ----
+            # ---- 阶段4：执行策略订单 ----
             for order in orders:
-                self._execute_entry(order, day_data, date)
+                # 判断是入场还是出场
+                if order.stock_code in self.positions:
+                    position = self.positions[order.stock_code]
+                    # 如果订单方向与持仓方向相反，则是平仓
+                    if order.direction != position.direction:
+                        self._execute_exit(order, day_data, date)
+                    else:
+                        # 同方向，可能是加仓（暂不支持）
+                        pass
+                else:
+                    # 无持仓，是开仓
+                    self._execute_entry(order, day_data, date)
             
             # ---- 阶段5：记录每日快照 ----
             self._record_snapshot(date, day_data, drawdown)
@@ -195,9 +206,13 @@ class BacktestEngine:
         """计算持仓市值"""
         total = 0.0
         for stock_code, position in self.positions.items():
-            price = day_data.get(stock_code, {}).get('close', 0)
-            if price > 0:
-                total += position.quantity * price
+            try:
+                if stock_code in day_data.index:
+                    price = day_data.loc[stock_code, 'close']
+                    if price > 0:
+                        total += position.quantity * price
+            except:
+                continue
         return total
 
     def _check_risk(self, context: Context, day_data: pd.DataFrame) -> List[Order]:
@@ -229,7 +244,15 @@ class BacktestEngine:
         if order.stock_code in self.positions:
             return
         
-        price = day_data.get(order.stock_code, {}).get('close', 0)
+        # 获取价格 - day_data 是 DataFrame，需要用 loc 或 iloc 访问
+        try:
+            if order.stock_code in day_data.index:
+                price = day_data.loc[order.stock_code, 'close']
+            else:
+                return
+        except:
+            return
+        
         if price <= 0:
             return
         
@@ -287,7 +310,16 @@ class BacktestEngine:
             return
         
         position = self.positions[order.stock_code]
-        price = day_data.get(order.stock_code, {}).get('close', 0)
+        
+        # 获取价格
+        try:
+            if order.stock_code in day_data.index:
+                price = day_data.loc[order.stock_code, 'close']
+            else:
+                return
+        except:
+            return
+        
         if price <= 0:
             return
         
