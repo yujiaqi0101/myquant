@@ -26,6 +26,9 @@ class DatabaseManager:
 
     提供数据库连接、表创建、数据CRUD操作功能。
     """
+    
+    # 类级别缓存：记录已初始化的数据库路径
+    _initialized_paths: set = set()
 
     def __init__(self, db_path: str):
         """
@@ -38,7 +41,12 @@ class DatabaseManager:
         """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_database()
+        
+        # 同一路径只初始化一次表结构
+        abs_path = str(self.db_path.resolve())
+        if abs_path not in DatabaseManager._initialized_paths:
+            self._init_database()
+            DatabaseManager._initialized_paths.add(abs_path)
 
     @contextmanager
     def get_connection(self):
@@ -359,6 +367,48 @@ class DatabaseManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_valuation_summary_stock ON valuation_summary(stock_code)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_valuation_summary_date ON valuation_summary(report_date)')
+
+            # ============ 股票池表 ============
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stock_pool (
+                    pool_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_name VARCHAR(100) NOT NULL UNIQUE,
+                    pool_code VARCHAR(50),
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stock_pool_member (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_id INTEGER NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
+                    added_date DATE,
+                    removed_date DATE,
+                    FOREIGN KEY (pool_id) REFERENCES stock_pool(pool_id) ON DELETE CASCADE,
+                    UNIQUE(pool_id, stock_code, added_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pool_member_pool ON stock_pool_member(pool_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pool_member_stock ON stock_pool_member(stock_code)')
+
+            # ============ 交易日历表 ============
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trade_calendar (
+                    trade_date TEXT PRIMARY KEY
+                )
+            ''')
+            # 首次创建时从 stock_daily 填充
+            cursor.execute('SELECT COUNT(*) as cnt FROM trade_calendar')
+            count = cursor.fetchone()['cnt']
+            if count == 0:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO trade_calendar (trade_date)
+                    SELECT DISTINCT trade_date FROM stock_daily
+                ''')
+                logger.info(f"交易日历表已填充 {cursor.rowcount} 条记录")
 
             # ============ 因子注册表 ============
             cursor.execute('''
@@ -799,11 +849,11 @@ class DatabaseManager:
     # ============ 工具方法 ============
 
     def get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
-        """获取交易日列表"""
+        """获取交易日列表（从 trade_calendar 表查询）"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT DISTINCT trade_date FROM stock_daily
+                SELECT trade_date FROM trade_calendar
                 WHERE trade_date BETWEEN ? AND ?
                 ORDER BY trade_date
             ''', (start_date, end_date))
@@ -1665,6 +1715,342 @@ class DatabaseManager:
             for table in ['stock_daily', 'index_daily', 'stock_info', 'execution_log', 'best_records',
                           'index_constituent', 'portfolio_analysis', 'factor_exposure',
                           'qmt_instrument', 'data_sync_log', 'valuation_result', 'valuation_summary',
-                          'factor_registry', 'financial_data']:
+                          'factor_registry', 'financial_data', 'stock_pool', 'stock_pool_member',
+                          'trade_calendar']:
                 cursor.execute(f'DELETE FROM {table}')
             logger.info("已清空所有数据")
+
+    # ============ 股票池操作 ============
+
+    def create_stock_pool(
+        self,
+        pool_name: str,
+        pool_code: Optional[str] = None,
+        description: Optional[str] = None
+    ) -> int:
+        """
+        创建股票池
+
+        Parameters
+        ----------
+        pool_name : str
+            股票池名称（唯一）
+        pool_code : str, optional
+            股票池代码（如 CSI300）
+        description : str, optional
+            描述
+
+        Returns
+        -------
+        int
+            新记录的 pool_id，如果已存在则返回 -1
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                    INSERT INTO stock_pool (pool_name, pool_code, description)
+                    VALUES (?, ?, ?)
+                ''', (pool_name, pool_code, description))
+                pool_id = cursor.lastrowid
+                logger.info(f"创建股票池: {pool_name} (id={pool_id})")
+                return pool_id
+            except sqlite3.IntegrityError:
+                logger.warning(f"股票池已存在: {pool_name}")
+                return -1
+
+    def delete_stock_pool(self, pool_name: str) -> bool:
+        """
+        删除股票池及其所有成员
+
+        Parameters
+        ----------
+        pool_name : str
+            股票池名称
+
+        Returns
+        -------
+        bool
+            是否删除成功
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"股票池不存在: {pool_name}")
+                return False
+
+            pool_id = row['pool_id']
+            cursor.execute('DELETE FROM stock_pool_member WHERE pool_id = ?', (pool_id,))
+            cursor.execute('DELETE FROM stock_pool WHERE pool_id = ?', (pool_id,))
+            logger.info(f"删除股票池: {pool_name}")
+            return True
+
+    def list_stock_pools(self) -> List[Dict]:
+        """
+        列出所有股票池
+
+        Returns
+        -------
+        list[dict]
+            股票池列表，每项包含 pool_name, pool_code, description, member_count, created_at
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT p.pool_name, p.pool_code, p.description, p.created_at,
+                       COUNT(m.id) as member_count
+                FROM stock_pool p
+                LEFT JOIN stock_pool_member m ON p.pool_id = m.pool_id AND m.removed_date IS NULL
+                GROUP BY p.pool_id
+                ORDER BY p.created_at DESC
+            ''')
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_stock_pool_info(self, pool_name: str) -> Optional[Dict]:
+        """
+        获取股票池信息
+
+        Parameters
+        ----------
+        pool_name : str
+            股票池名称
+
+        Returns
+        -------
+        dict or None
+            股票池信息
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def add_to_stock_pool(
+        self,
+        pool_name: str,
+        stock_codes: List[str],
+        added_date: Optional[str] = None
+    ) -> int:
+        """
+        添加股票到股票池
+
+        Parameters
+        ----------
+        pool_name : str
+            股票池名称
+        stock_codes : list[str]
+            股票代码列表
+        added_date : str, optional
+            加入日期（默认今天）
+
+        Returns
+        -------
+        int
+            添加的记录数
+        """
+        if added_date is None:
+            added_date = datetime.now().strftime('%Y-%m-%d')
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"股票池不存在: {pool_name}")
+                return 0
+
+            pool_id = row['pool_id']
+            count = 0
+            for code in stock_codes:
+                try:
+                    cursor.execute('''
+                        INSERT INTO stock_pool_member (pool_id, stock_code, added_date)
+                        VALUES (?, ?, ?)
+                    ''', (pool_id, code.strip(), added_date))
+                    count += 1
+                except sqlite3.IntegrityError:
+                    # 已存在则跳过
+                    pass
+
+            logger.info(f"向股票池 {pool_name} 添加 {count} 只股票")
+            return count
+
+    def remove_from_stock_pool(
+        self,
+        pool_name: str,
+        stock_codes: List[str],
+        removed_date: Optional[str] = None
+    ) -> int:
+        """
+        从股票池移除股票（标记 removed_date，不物理删除）
+
+        Parameters
+        ----------
+        pool_name : str
+            股票池名称
+        stock_codes : list[str]
+            股票代码列表
+        removed_date : str, optional
+            移除日期（默认今天）
+
+        Returns
+        -------
+        int
+            移除的记录数
+        """
+        if removed_date is None:
+            removed_date = datetime.now().strftime('%Y-%m-%d')
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            row = cursor.fetchone()
+            if not row:
+                return 0
+
+            pool_id = row['pool_id']
+            placeholders = ','.join(['?' for _ in stock_codes])
+            cursor.execute(f'''
+                UPDATE stock_pool_member
+                SET removed_date = ?
+                WHERE pool_id = ? AND stock_code IN ({placeholders}) AND removed_date IS NULL
+            ''', [removed_date, pool_id] + [c.strip() for c in stock_codes])
+            count = cursor.rowcount
+
+            logger.info(f"从股票池 {pool_name} 移除 {count} 只股票")
+            return count
+
+    def get_stock_pool_members(
+        self,
+        pool_name: str,
+        trade_date: Optional[str] = None
+    ) -> List[str]:
+        """
+        获取股票池的有效成员列表
+
+        Parameters
+        ----------
+        pool_name : str
+            股票池名称
+        trade_date : str, optional
+            查询日期（默认返回当前有效成员）
+            如果指定日期，返回该日期有效的成员（added_date <= trade_date 且 removed_date IS NULL 或 removed_date > trade_date）
+
+        Returns
+        -------
+        list[str]
+            股票代码列表
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            row = cursor.fetchone()
+            if not row:
+                return []
+
+            pool_id = row['pool_id']
+
+            if trade_date:
+                cursor.execute('''
+                    SELECT DISTINCT stock_code FROM stock_pool_member
+                    WHERE pool_id = ?
+                      AND added_date <= ?
+                      AND (removed_date IS NULL OR removed_date > ?)
+                    ORDER BY stock_code
+                ''', (pool_id, trade_date, trade_date))
+            else:
+                cursor.execute('''
+                    SELECT DISTINCT stock_code FROM stock_pool_member
+                    WHERE pool_id = ? AND removed_date IS NULL
+                    ORDER BY stock_code
+                ''', (pool_id,))
+
+            return [row['stock_code'] for row in cursor.fetchall()]
+
+    def import_index_as_pool(
+        self,
+        index_code: str,
+        pool_name: str,
+        description: Optional[str] = None
+    ) -> int:
+        """
+        将指数成分股导入为股票池
+
+        Parameters
+        ----------
+        index_code : str
+            指数代码（如 000300.SH）
+        pool_name : str
+            股票池名称
+        description : str, optional
+            描述
+
+        Returns
+        -------
+        int
+            导入的股票数量，-1 表示失败
+        """
+        # 获取指数成分股
+        constituents = self.get_index_constituent(index_code)
+        if constituents.empty:
+            logger.warning(f"指数 {index_code} 无成分股数据")
+            return -1
+
+        stock_codes = constituents['stock_code'].tolist()
+        if description is None:
+            description = f"从指数 {index_code} 导入，共 {len(stock_codes)} 只成分股"
+
+        # 创建股票池
+        pool_id = self.create_stock_pool(pool_name, pool_code=index_code, description=description)
+        if pool_id == -1:
+            # 股票池已存在，直接添加成员
+            pool_id = self.get_stock_pool_info(pool_name)['pool_id']
+
+        # 添加成员
+        count = self.add_to_stock_pool(pool_name, stock_codes)
+        return count
+
+    def import_csv_as_pool(
+        self,
+        csv_path: str,
+        pool_name: str,
+        code_column: str = 'stock_code',
+        description: Optional[str] = None
+    ) -> int:
+        """
+        从CSV文件导入股票池
+
+        Parameters
+        ----------
+        csv_path : str
+            CSV文件路径
+        pool_name : str
+            股票池名称
+        code_column : str
+            股票代码所在列名
+        description : str, optional
+            描述
+
+        Returns
+        -------
+        int
+            导入的股票数量
+        """
+        df = pd.read_csv(csv_path)
+        if code_column not in df.columns:
+            logger.error(f"CSV文件中找不到列 '{code_column}'，可用列: {list(df.columns)}")
+            return -1
+
+        stock_codes = df[code_column].astype(str).str.strip().tolist()
+        if description is None:
+            description = f"从CSV导入 {csv_path}，共 {len(stock_codes)} 只股票"
+
+        pool_id = self.create_stock_pool(pool_name, description=description)
+        if pool_id == -1:
+            # 已存在，直接添加
+            pass
+
+        return self.add_to_stock_pool(pool_name, stock_codes)

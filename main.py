@@ -617,6 +617,7 @@ def main():
         setup_strategy_parser, run_strategy_command,
         setup_backtest_parser, run_backtest_command,
         setup_result_parser, run_result_command,
+        setup_pool_parser, run_pool_command,
     )
     
     # strategy 子命令
@@ -630,6 +631,10 @@ def main():
     # result 子命令
     result_parser = subparsers.add_parser('result', help='回测结果管理')
     setup_result_parser(result_parser)
+    
+    # pool 子命令
+    pool_parser = subparsers.add_parser('pool', help='股票池管理')
+    setup_pool_parser(pool_parser)
     
     # 原有参数（向后兼容）
     parser.add_argument('--source', choices=['test', 'real', 'database', 'mock'],
@@ -740,6 +745,9 @@ def main():
         return
     elif args.command == 'result':
         run_result_command(args)
+        return
+    elif args.command == 'pool':
+        run_pool_command(args)
         return
     
     # 数据模式设置

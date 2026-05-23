@@ -59,7 +59,8 @@ def run_strategy_command(args: argparse.Namespace):
             print(f"  {s['name']:<20} {s['description'][:40]}")
         print("=" * 60)
         print(f"共 {len(strategies)} 个策略")
-        print("\n使用 'python main.py strategy --show <策略名>' 查看详情")
+        print("\n使用 'python main.py strategy --list' 列出所有策略")
+        print("使用 'python main.py strategy --show <策略名>' 查看详情")
         return
     
     # 3. 查看策略详情
@@ -101,8 +102,18 @@ def run_strategy_command(args: argparse.Namespace):
         print("=" * 60)
         return
     
-    # 无参数时显示帮助
-    parser.print_help()
+    # 无参数时显示提示信息
+    print("\n策略管理命令")
+    print("=" * 60)
+    print("\n可用选项：")
+    print("  --list, -l          列出所有可用策略")
+    print("  --show <策略名>     查看策略详情（显示策略类注释和参数说明）")
+    print("  --params            显示策略参数详细说明（与 --show 配合使用）")
+    print("\n示例：")
+    print("  python main.py strategy --list")
+    print("  python main.py strategy --show BreakoutPullbackStrategy")
+    print("  python main.py strategy --show BreakoutPullbackStrategy --params")
+    print("=" * 60)
 
 
 def setup_backtest_parser(parser: argparse.ArgumentParser):
@@ -113,6 +124,20 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         '--strategy', '-s',
         required=True,
         help='策略名称（通过 strategy --list 查看可用策略）'
+    )
+
+    # 股票池（与 --stocks 互斥）
+    parser.add_argument(
+        '--pool',
+        metavar='POOL_NAME',
+        help='使用股票池（通过 pool --list 查看可用股票池）'
+    )
+
+    # 股票列表（与 --pool 互斥）
+    parser.add_argument(
+        '--stocks',
+        metavar='CODES',
+        help='股票代码列表，逗号分隔（如 000001.SZ,600000.SH）'
     )
     
     # 时间范围
@@ -146,22 +171,29 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
     parser.add_argument(
         '--take-profit',
         type=float,
-        default=0.20,
-        help='止盈比例（如0.20表示20%）'
+        default=0,
+        help='止盈比例（如0.20表示20%，0表示禁用固定止盈）'
     )
     
     parser.add_argument(
         '--trailing-stop',
-        type=int,
+        type=float,
         default=3,
-        help='动态止盈均线窗口（如3表示跌破3日均线止盈）'
+        help='ATR跟踪止盈倍数（如3表示价格从最高点回落超过3×ATR时卖出，0=禁用）'
     )
     
     parser.add_argument(
         '--max-holding-days',
         type=int,
-        default=20,
-        help='最大持仓天数'
+        default=0,
+        help='最大持仓天数 (默认0，表示禁用超时平仓)'
+    )
+    
+    parser.add_argument(
+        '--execution-price',
+        choices=['close', 'next_open'],
+        default='close',
+        help='订单执行价格：close=收盘价(默认), next_open=次日开盘价'
     )
     
     parser.add_argument(
@@ -169,6 +201,13 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         type=float,
         default=0.10,
         help='单次开仓资金比例'
+    )
+    
+    parser.add_argument(
+        '--max-positions',
+        type=int,
+        default=30,
+        help='最大持仓数量（0表示不限制）'
     )
     
     parser.add_argument(
@@ -199,6 +238,43 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         help='组合止损比例'
     )
     
+    # 市场过滤参数
+    parser.add_argument(
+        '--exclude-st',
+        action='store_true',
+        default=False,
+        help='排除ST股（需要 stock_info 表有数据）'
+    )
+    
+    parser.add_argument(
+        '--exclude-new-stock',
+        type=int,
+        default=0,
+        metavar='DAYS',
+        help='排除上市不满N个交易日的股票（如 --exclude-new-stock 60，默认0不排除）'
+    )
+    
+    parser.add_argument(
+        '--exclude-limit',
+        action='store_true',
+        default=False,
+        help='排除涨跌停股'
+    )
+    
+    parser.add_argument(
+        '--exclude-suspend',
+        action='store_true',
+        default=False,
+        help='排除停牌股'
+    )
+    
+    parser.add_argument(
+        '--exclude-zero-vol',
+        action='store_true',
+        default=False,
+        help='排除零成交量股'
+    )
+    
     # 输出参数
     parser.add_argument(
         '--output-dir',
@@ -213,17 +289,15 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
     )
 
 
-def load_price_data(start_date: str, end_date: str, db_path: str = None) -> pd.DataFrame:
-    """加载价格数据"""
-    from src.data import DataLoader
+def load_price_data(start_date: str, end_date: str, stock_codes: List[str] = None, db_path: str = None) -> pd.DataFrame:
+    """加载价格数据 - 直接从数据库查询，避免加载全部数据"""
+    from src.data.database import DatabaseManager
     
     if db_path is None:
         db_path = str(Path(__file__).parent.parent.parent / 'data' / 'aquant.db')
     
-    data_loader = DataLoader.from_database(db_path)
-    
-    # 加载数据
-    price_data = data_loader.get_price_data(start_date, end_date)
+    db = DatabaseManager(db_path)
+    price_data = db.get_stock_daily(stock_codes=stock_codes, start_date=start_date, end_date=end_date)
     
     return price_data
 
@@ -254,14 +328,34 @@ def run_backtest_command(args: argparse.Namespace):
     warmup_days = max(warmup_days, 20)  # 最小20天
     
     # 4. 构建策略参数
+    # 根据持仓上限自动调整单只仓位（最大总仓位98%，留2%缓冲）
+    max_positions = args.max_positions
+    position_size = args.position_size
+    if max_positions > 0:
+        # 自动计算：总仓位98% / 持仓上限
+        auto_position_size = 0.98 / max_positions
+        # 如果用户未指定position_size或自动值更小，使用自动值
+        if args.position_size == 0.10:  # 默认值
+            position_size = auto_position_size
+            print(f"  自动调整单只仓位: {position_size:.4f} (98% / {max_positions}只)")
+        else:
+            # 用户指定了position_size，检查是否合理
+            total_usage = position_size * max_positions
+            if total_usage > 0.98:
+                print(f"  警告: 单只仓位{position_size:.2%} × 持仓上限{max_positions} = {total_usage:.2%} > 98%")
+                print(f"  已自动调整为 {auto_position_size:.4f}")
+                position_size = auto_position_size
+    
     strategy_params = {
         'stop_loss': args.stop_loss,
         'take_profit': args.take_profit,
         'trailing_stop': args.trailing_stop,
         'max_holding_days': args.max_holding_days,
-        'position_size': args.position_size,
+        'position_size': position_size,
+        'max_positions': max_positions,
         'commission_rate': args.commission_rate,
         'slippage': args.slippage,
+        'db_path': _get_db_path(),  # 供引擎加载 stock_info 做过滤
     }
     
     # 5. 创建策略实例
@@ -276,23 +370,62 @@ def run_backtest_command(args: argparse.Namespace):
             portfolio_stop=args.portfolio_stop,
         )
     
+    # 构建市场过滤配置
+    market_filter = {}
+    if args.exclude_st:
+        market_filter['exclude_st'] = True
+    if args.exclude_new_stock > 0:
+        market_filter['exclude_new_stock'] = args.exclude_new_stock
+    if args.exclude_limit:
+        market_filter['exclude_limit'] = True
+    if args.exclude_suspend:
+        market_filter['exclude_suspend'] = True
+    if args.exclude_zero_vol:
+        market_filter['exclude_zero_vol'] = True
+    
     engine = BacktestEngine(
         strategy=strategy,
         initial_capital=args.initial_capital,
         enable_engine_exit=True,
         risk_controller=risk_controller,
+        execution_price=args.execution_price,
+        market_filter=market_filter,
     )
     
-    # 7. 加载数据（含预热期）
+    # 7. 确定股票范围
+    stock_codes = None
+    pool_name = None
+
+    if args.pool and args.stocks:
+        print("错误：--pool 和 --stocks 不能同时使用")
+        return
+
+    if args.pool:
+        from src.data.database import DatabaseManager
+        db = DatabaseManager(_get_db_path())
+        stock_codes = db.get_stock_pool_members(args.pool)
+        if not stock_codes:
+            print(f"错误：股票池 '{args.pool}' 不存在或为空")
+            return
+        pool_name = args.pool
+
+    if args.stocks:
+        stock_codes = [s.strip() for s in args.stocks.split(',')]
+
+    # 8. 加载数据（含预热期）
     start_dt = pd.Timestamp(args.start_date)
     warmup_start = (start_dt - timedelta(days=int(warmup_days * 1.5 + 10))).strftime('%Y-%m-%d')
     
     print(f"数据加载：")
     print(f"  预热期: {warmup_start} ~ {args.start_date} (约{warmup_days}个交易日)")
     print(f"  回测期: {args.start_date} ~ {args.end_date}")
+    if pool_name:
+        print(f"  股票池: {pool_name} ({len(stock_codes)} 只)")
+    elif stock_codes:
+        print(f"  股票列表: {len(stock_codes)} 只")
     
     # 加载完整数据（预热期+回测期）
-    full_data = load_price_data(warmup_start, args.end_date)
+    full_data = load_price_data(warmup_start, args.end_date, stock_codes=stock_codes)
     
     # 分离预热期和回测期数据
     warmup_data = full_data[full_data.index.get_level_values('trade_date') < args.start_date]
@@ -304,17 +437,42 @@ def run_backtest_command(args: argparse.Namespace):
     print(f"\n开始回测...")
     result = engine.run(price_data, warmup_data)
     
-    # 9. 保存结果
+    # 9. 先记录执行日志，获取 log_id
+    from src.data.database import DatabaseManager
+    db = DatabaseManager(_get_db_path())
+    
+    perf = result.performance
+    log_id = db.log_execution(
+        execution_type='backtest',
+        factor_name=strategy_class.name or args.strategy,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        n_stocks=len(stock_codes) if stock_codes else 0,
+        total_return=result.total_return,
+        annual_return=perf.get('annual_return', 0),
+        sharpe_ratio=perf.get('sharpe_ratio', 0),
+        max_drawdown=perf.get('max_drawdown', 0),
+        win_rate=perf.get('win_rate', 0),
+        calmar_ratio=perf.get('calmar_ratio', 0),
+        volatility=perf.get('annual_volatility', 0),
+        params_json=json.dumps(strategy_params)
+    )
+    
+    # 10. 保存结果（使用 log_id 命名目录）
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    report_name = args.name or f"backtest_{args.start_date}_{args.end_date}"
+    if args.name:
+        report_name = args.name
+    else:
+        report_name = f"backtest_{log_id:04d}_{args.start_date}_{args.end_date}"
     result_dir = output_dir / report_name
     result_dir.mkdir(parents=True, exist_ok=True)
     
     # 保存绩效
     with open(result_dir / 'performance.json', 'w', encoding='utf-8') as f:
         json.dump({
+            'log_id': log_id,
             'strategy_name': result.strategy_name,
             'start_date': result.start_date,
             'end_date': result.end_date,
@@ -362,7 +520,45 @@ def run_backtest_command(args: argparse.Namespace):
     with open(result_dir / 'snapshots.json', 'w', encoding='utf-8') as f:
         json.dump(snapshots_data, f, indent=2, ensure_ascii=False)
     
+    # 保存K线数据（只保存有交易的股票）
+    traded_stocks = set(t.stock_code for t in result.trades)
+    if traded_stocks and price_data is not None:
+        kline_data = {}
+        for stock_code in traded_stocks:
+            try:
+                if isinstance(price_data.index, pd.MultiIndex):
+                    stock_kline = price_data.xs(stock_code, level='stock_code')
+                else:
+                    stock_kline = price_data[price_data['stock_code'] == stock_code]
+                
+                # 转换为字典列表
+                kline_data[stock_code] = [
+                    {
+                        'date': idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx),
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': float(row['close']),
+                        'volume': float(row.get('volume', 0)),
+                    }
+                    for idx, row in stock_kline.iterrows()
+                ]
+            except Exception:
+                continue
+        
+        with open(result_dir / 'klines.json', 'w', encoding='utf-8') as f:
+            json.dump(kline_data, f, ensure_ascii=False)
+    
+    # 生成 HTML 报告
+    from src.report import generate_html_report
+    try:
+        html_path = generate_html_report(result_dir)
+        print(f"\n  HTML报告: {html_path}")
+    except Exception as e:
+        print(f"\n  HTML报告生成失败: {e}")
+    
     print(f"\n回测完成！")
+    print(f"  日志ID: {log_id}")
     print(f"  报告目录: {result_dir}")
     print(f"\n绩效摘要：")
     print(f"  总收益率: {result.total_return:.2%}")
@@ -420,6 +616,13 @@ def setup_result_parser(parser: argparse.ArgumentParser):
         '--delete',
         metavar='RESULT_PATH',
         help='删除回测结果'
+    )
+    
+    # 生成 HTML 报告
+    parser.add_argument(
+        '--html',
+        metavar='RESULT_PATH',
+        help='生成 HTML 报告'
     )
 
 
@@ -618,7 +821,25 @@ def run_result_command(args: argparse.Namespace):
         print(f"交易记录已导出: {output_path}")
         return
     
-    # 4. 删除结果
+    # 4. 生成 HTML 报告
+    if args.html:
+        result_path = Path(args.html)
+        if not result_path.exists():
+            result_path = reports_dir / args.html
+        
+        if not result_path.exists():
+            print(f"错误：找不到回测结果 '{args.html}'")
+            return
+        
+        from src.report import generate_html_report
+        try:
+            html_path = generate_html_report(str(result_path))
+            print(f"HTML 报告已生成: {html_path}")
+        except Exception as e:
+            print(f"生成失败: {e}")
+        return
+    
+    # 5. 删除结果
     if args.delete:
         result_path = Path(args.delete)
         if not result_path.exists():
@@ -632,5 +853,267 @@ def run_result_command(args: argparse.Namespace):
         print(f"已删除: {result_path}")
         return
     
-    # 无参数时显示帮助
-    parser.print_help()
+    # 无参数时显示提示信息
+    print("\n回测结果管理命令")
+    print("=" * 60)
+    print("\n可用选项：")
+    print("  --list, -l          列出已有回测结果")
+    print("  --show <路径>       查看回测结果摘要")
+    print("  --date <日期>       查看指定日期的详情（与 --show 配合使用）")
+    print("  --detail <类型>     详情类型: cashflow/positions/trades/all")
+    print("  --export <路径>     导出回测结果")
+    print("  --html <路径>       生成 HTML 报告")
+    print("  --delete <路径>     删除回测结果")
+    print("\n示例：")
+    print("  python main.py result --list")
+    print("  python main.py result --show reports/backtest_2024-01-01_2024-12-31")
+    print("  python main.py result --show <路径> --date 2024-06-01 --detail trades")
+    print("  python main.py result --html reports/backtest_2024-01-01_2024-12-31")
+    print("=" * 60)
+
+
+# ============ 股票池管理命令 ============
+
+def setup_pool_parser(parser: argparse.ArgumentParser):
+    """设置股票池管理命令参数"""
+
+    # 列出股票池
+    parser.add_argument(
+        '--list', '-l',
+        action='store_true',
+        help='列出所有股票池'
+    )
+
+    # 创建股票池
+    parser.add_argument(
+        '--create',
+        metavar='POOL_NAME',
+        help='创建股票池'
+    )
+
+    # 股票池代码
+    parser.add_argument(
+        '--code',
+        metavar='CODE',
+        help='股票池代码（如 CSI300，与 --create 配合使用）'
+    )
+
+    # 描述
+    parser.add_argument(
+        '--desc',
+        metavar='DESCRIPTION',
+        help='股票池描述（与 --create 配合使用）'
+    )
+
+    # 查看股票池详情
+    parser.add_argument(
+        '--show',
+        metavar='POOL_NAME',
+        help='查看股票池详情（含成员列表）'
+    )
+
+    # 删除股票池
+    parser.add_argument(
+        '--delete',
+        metavar='POOL_NAME',
+        help='删除股票池'
+    )
+
+    # 添加成员
+    parser.add_argument(
+        '--add',
+        metavar='POOL_NAME',
+        help='向股票池添加股票（配合 --stocks 使用）'
+    )
+
+    # 移除成员
+    parser.add_argument(
+        '--remove',
+        metavar='POOL_NAME',
+        help='从股票池移除股票（配合 --stocks 使用）'
+    )
+
+    # 股票代码列表（逗号分隔）
+    parser.add_argument(
+        '--stocks',
+        metavar='CODES',
+        help='股票代码列表，逗号分隔（如 000001.SZ,600000.SH）'
+    )
+
+    # 从CSV导入
+    parser.add_argument(
+        '--import-csv',
+        metavar='CSV_PATH',
+        help='从CSV文件导入股票到股票池（配合 --add 使用）'
+    )
+
+    # 从指数导入
+    parser.add_argument(
+        '--import-index',
+        metavar='INDEX_CODE',
+        help='从指数成分股导入为股票池（配合 --create 使用）'
+    )
+
+
+def _get_db_path() -> str:
+    """获取数据库路径"""
+    return str(Path(__file__).parent.parent.parent / 'data' / 'aquant.db')
+
+
+def run_pool_command(args: argparse.Namespace):
+    """执行股票池管理命令"""
+
+    from src.data.database import DatabaseManager
+
+    db = DatabaseManager(_get_db_path())
+
+    # 1. 列出所有股票池
+    if args.list:
+        pools = db.list_stock_pools()
+        if not pools:
+            print("\n暂无股票池")
+            return
+
+        print("\n股票池列表：")
+        print("=" * 80)
+        print(f"{'名称':<20} {'代码':<15} {'成员数':>8}  {'描述':<25} {'创建时间'}")
+        print("-" * 80)
+        for p in pools:
+            desc = (p['description'] or '')[:24]
+            print(f"{p['pool_name']:<20} {(p['pool_code'] or ''):<15} {p['member_count']:>8}  {desc:<25} {p['created_at']}")
+        print("=" * 80)
+        print(f"共 {len(pools)} 个股票池")
+        print("\n使用 'python main.py pool --show <名称>' 查看详情")
+        return
+
+    # 2. 创建股票池
+    if args.create:
+        pool_name = args.create
+
+        # 如果指定了从指数导入
+        if args.import_index:
+            count = db.import_index_as_pool(args.import_index, pool_name, args.desc)
+            if count == -1:
+                print(f"错误：指数 {args.import_index} 无成分股数据")
+            else:
+                print(f"已从指数 {args.import_index} 创建股票池 '{pool_name}'，导入 {count} 只股票")
+            return
+
+        pool_id = db.create_stock_pool(pool_name, args.code, args.desc)
+        if pool_id == -1:
+            print(f"错误：股票池 '{pool_name}' 已存在")
+        else:
+            print(f"已创建股票池: {pool_name}")
+            if args.code:
+                print(f"  代码: {args.code}")
+            if args.desc:
+                print(f"  描述: {args.desc}")
+            print(f"\n使用 'python main.py pool --add {pool_name} --stocks <代码列表>' 添加股票")
+        return
+
+    # 3. 查看股票池详情
+    if args.show:
+        pool_name = args.show
+        info = db.get_stock_pool_info(pool_name)
+        if not info:
+            print(f"错误：股票池 '{pool_name}' 不存在")
+            return
+
+        members = db.get_stock_pool_members(pool_name)
+        print(f"\n股票池: {pool_name}")
+        print("=" * 60)
+        if info.get('pool_code'):
+            print(f"  代码: {info['pool_code']}")
+        if info.get('description'):
+            print(f"  描述: {info['description']}")
+        print(f"  创建时间: {info['created_at']}")
+        print(f"  当前成员数: {len(members)}")
+
+        if members:
+            print(f"\n成员列表（共 {len(members)} 只）：")
+            # 每行显示8个
+            for i in range(0, len(members), 8):
+                print("  " + ", ".join(members[i:i + 8]))
+        else:
+            print("\n  （空股票池）")
+
+        print("=" * 60)
+        return
+
+    # 4. 删除股票池
+    if args.delete:
+        pool_name = args.delete
+        if db.delete_stock_pool(pool_name):
+            print(f"已删除股票池: {pool_name}")
+        else:
+            print(f"错误：股票池 '{pool_name}' 不存在")
+        return
+
+    # 5. 添加成员
+    if args.add:
+        pool_name = args.add
+
+        # 从CSV导入
+        if args.import_csv:
+            csv_path = args.import_csv
+            if not Path(csv_path).exists():
+                print(f"错误：文件不存在 '{csv_path}'")
+                return
+            count = db.import_csv_as_pool(csv_path, pool_name)
+            if count == -1:
+                print("导入失败")
+            else:
+                print(f"已从CSV导入 {count} 只股票到股票池 '{pool_name}'")
+            return
+
+        # 从命令行添加
+        if not args.stocks:
+            print("错误：请通过 --stocks 指定股票代码列表")
+            return
+
+        stock_codes = [s.strip() for s in args.stocks.split(',')]
+        count = db.add_to_stock_pool(pool_name, stock_codes)
+        if count == 0:
+            # 可能是已存在，检查股票池是否存在
+            info = db.get_stock_pool_info(pool_name)
+            if info is None:
+                print(f"错误：股票池 '{pool_name}' 不存在，请先创建")
+            else:
+                print(f"所有股票已存在于 '{pool_name}' 中，无需重复添加")
+        else:
+            print(f"已向 '{pool_name}' 添加 {count} 只股票（跳过已存在的）")
+        return
+
+    # 6. 移除成员
+    if args.remove:
+        pool_name = args.remove
+        if not args.stocks:
+            print("错误：请通过 --stocks 指定要移除的股票代码列表")
+            return
+
+        stock_codes = [s.strip() for s in args.stocks.split(',')]
+        count = db.remove_from_stock_pool(pool_name, stock_codes)
+        print(f"已从 '{pool_name}' 移除 {count} 只股票")
+        return
+
+    # 无参数时显示提示信息
+    print("\n股票池管理命令")
+    print("=" * 60)
+    print("\n可用选项：")
+    print("  --list, -l                  列出所有股票池")
+    print("  --create <名称>             创建股票池")
+    print("  --code <代码>               股票池代码（与 --create 配合）")
+    print("  --desc <描述>               股票池描述（与 --create 配合）")
+    print("  --show <名称>               查看股票池详情和成员列表")
+    print("  --delete <名称>             删除股票池")
+    print("  --add <名称> --stocks <代码>   添加股票到池")
+    print("  --remove <名称> --stocks <代码> 从池移除股票")
+    print("  --import-csv <路径>         从CSV导入（与 --add 配合）")
+    print("  --import-index <指数代码>   从指数成分股创建（与 --create 配合）")
+    print("\n示例：")
+    print("  python main.py pool --list")
+    print("  python main.py pool --create tech_pool --desc '科技股精选'")
+    print("  python main.py pool --add tech_pool --stocks 000001.SZ,600000.SH")
+    print("  python main.py pool --show tech_pool")
+    print("  python main.py pool --create CSI300 --import-index 000300.SH")
+    print("=" * 60)

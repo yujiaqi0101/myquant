@@ -42,6 +42,7 @@ class BaseStrategy(ABC):
         'trailing_stop': 3,
         'max_holding_days': 20,
         'position_size': 0.10,
+        'max_positions': 30,  # 最大持仓数量
         'commission_rate': 0.0003,
         'slippage': 0.0001,
     }

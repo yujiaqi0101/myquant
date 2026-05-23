@@ -48,11 +48,17 @@ class BacktestEngine:
         initial_capital: float = 1_000_000,
         enable_engine_exit: bool = True,
         risk_controller: Any = None,
+        execution_price: str = 'close',
+        market_filter: Dict[str, Any] = None,
     ):
         self.strategy = strategy
         self.initial_capital = initial_capital
         self.enable_engine_exit = enable_engine_exit
         self.risk_controller = risk_controller
+        self.execution_price = execution_price  # 'close' 或 'next_open'
+        
+        # 市场过滤配置
+        self.market_filter = market_filter or {}
         
         # 从策略参数获取交易成本
         self.commission_rate = strategy.params.get('commission_rate', 0.0003)
@@ -68,6 +74,14 @@ class BacktestEngine:
         self.trades: List[TradeRecord] = []
         self.daily_snapshots: List[DailySnapshot] = []
         self.peak_value = initial_capital
+        
+        # 延迟执行订单队列（用于次日开盘执行）
+        self._pending_orders: List[Order] = []
+        
+        # ST/新股过滤缓存（静态数据，只需加载一次）
+        self._stock_info_cache: Optional[pd.DataFrame] = None
+        self._st_filtered_codes: Optional[set] = None
+        self._trade_dates_cache: Optional[List[str]] = None  # 交易日历缓存
 
     def run(
         self, 
@@ -126,27 +140,64 @@ class BacktestEngine:
         )
         
         # 策略初始化 - 此时可访问完整数据（含预热期）
+        import time as _time
+        _t0 = _time.time()
         self.strategy.on_init(context)
+        print(f"  策略初始化耗时: {_time.time()-_t0:.1f}s")
         self.strategy.on_start(context)
         
+        # 预计算ATR（用于ATR跟踪止盈）
+        atr_window = self.strategy.params.get('atr_window', 14)
+        self._atr_data = self._precompute_atr(full_data, atr_window)
+        
         # 逐日事件循环
-        for date in trade_dates:
+        for i, date in enumerate(trade_dates):
             context.date = date
             
             # 准备当日数据
             day_data = price_data.xs(date, level='trade_date')
+            day_data_raw = day_data  # 保存原始数据（用于计算持仓市值）
+            
+            # ---- 市场过滤 ----
+            day_data = self._apply_market_filter(day_data, date)
+            
             context.market_data = day_data.to_dict('index') if not day_data.empty else {}
             
-            # 更新账户状态
-            position_value = self._calc_position_value(day_data)
+            # 添加当日ATR到market_data
+            date_str = date.strftime('%Y-%m-%d')
+            if self._atr_data is not None and date_str in self._atr_data:
+                for stock_code, atr in self._atr_data[date_str].items():
+                    if stock_code in context.market_data:
+                        context.market_data[stock_code]['atr'] = atr
+            
+            # 更新账户状态（用原始数据计算持仓市值，不受涨跌停过滤影响）
+            position_value = self._calc_position_value(day_data_raw)
             context.cash = self.cash
             context.frozen_cash = self.frozen_cash
             context.total_value = self.cash + self.frozen_cash + position_value
+            
+            # 更新持仓最高价（用于ATR跟踪止盈）
+            for stock_code, position in self.positions.items():
+                if stock_code in context.market_data:
+                    high = context.market_data[stock_code].get('high', 0)
+                    if high > 0 and high > position.highest_price:
+                        position.highest_price = high
             
             # 更新峰值和回撤
             if context.total_value > self.peak_value:
                 self.peak_value = context.total_value
             drawdown = (self.peak_value - context.total_value) / self.peak_value
+            
+            # ---- 阶段0：执行前一日延迟的订单（次日开盘执行）----
+            if self.execution_price == 'next_open' and self._pending_orders:
+                for order in self._pending_orders:
+                    if order.stock_code in self.positions:
+                        # 出场订单
+                        self._execute_exit(order, day_data, date, use_open_price=True)
+                    else:
+                        # 入场订单
+                        self._execute_entry(order, day_data, date, use_open_price=True)
+                self._pending_orders = []
             
             # ---- 阶段1：引擎级出场检查 ----
             exit_orders = []
@@ -172,7 +223,7 @@ class BacktestEngine:
                 risk_orders = self._check_risk(context, day_data)
                 exit_orders.extend(risk_orders)
             
-            # 执行出场订单
+            # 执行出场订单（立即执行）
             for order in exit_orders:
                 self._execute_exit(order, day_data, date)
             
@@ -192,10 +243,19 @@ class BacktestEngine:
                         pass
                 else:
                     # 无持仓，是开仓
-                    self._execute_entry(order, day_data, date)
+                    if self.execution_price == 'next_open':
+                        # 延迟到次日开盘执行
+                        self._pending_orders.append(order)
+                    else:
+                        # 立即执行（收盘价）
+                        self._execute_entry(order, day_data, date)
             
             # ---- 阶段5：记录每日快照 ----
-            self._record_snapshot(date, day_data, drawdown)
+            self._record_snapshot(date, day_data_raw, drawdown)
+            
+            # 进度输出（每100天）
+            if (i + 1) % 100 == 0 or i == len(trade_dates) - 1:
+                print(f"  回测进度: {date.strftime('%Y-%m-%d')} ({i+1}/{len(trade_dates)})")
         
         # 回测结束
         self.strategy.on_stop(context)
@@ -238,16 +298,17 @@ class BacktestEngine:
                     ))
         return orders
 
-    def _execute_entry(self, order: Order, day_data: pd.DataFrame, date: pd.Timestamp):
+    def _execute_entry(self, order: Order, day_data: pd.DataFrame, date: pd.Timestamp, use_open_price: bool = False):
         """执行入场订单"""
         # 检查是否已有持仓
         if order.stock_code in self.positions:
             return
         
         # 获取价格 - day_data 是 DataFrame，需要用 loc 或 iloc 访问
+        price_col = 'open' if use_open_price else 'close'
         try:
             if order.stock_code in day_data.index:
-                price = day_data.loc[order.stock_code, 'close']
+                price = day_data.loc[order.stock_code, price_col]
             else:
                 return
         except:
@@ -277,6 +338,7 @@ class BacktestEngine:
             entry_price=price,
             entry_date=date,
             entry_reason=order.reason,
+            highest_price=price,  # 初始化为入场价
         )
         
         # 通知风控
@@ -304,7 +366,7 @@ class BacktestEngine:
         # 回调
         self.strategy.on_order_filled(Context(date=date), trade)
 
-    def _execute_exit(self, order: Order, day_data: pd.DataFrame, date: pd.Timestamp):
+    def _execute_exit(self, order: Order, day_data: pd.DataFrame, date: pd.Timestamp, use_open_price: bool = False):
         """执行出场订单"""
         if order.stock_code not in self.positions:
             return
@@ -312,9 +374,10 @@ class BacktestEngine:
         position = self.positions[order.stock_code]
         
         # 获取价格
+        price_col = 'open' if use_open_price else 'close'
         try:
             if order.stock_code in day_data.index:
-                price = day_data.loc[order.stock_code, 'close']
+                price = day_data.loc[order.stock_code, price_col]
             else:
                 return
         except:
@@ -360,6 +423,199 @@ class BacktestEngine:
         
         # 回调
         self.strategy.on_order_filled(Context(date=date), trade)
+
+    def _apply_market_filter(self, day_data: pd.DataFrame, date: pd.Timestamp) -> pd.DataFrame:
+        """
+        对当日市场数据应用过滤规则
+        
+        只检查 day_data 中实际存在的股票，而非全市场扫描。
+        """
+        if not self.market_filter or day_data.empty:
+            return day_data
+        
+        mask = pd.Series(True, index=day_data.index)
+        stock_codes_in_data = set(day_data.index)
+        
+        # 1. 排除ST（只检查当天在 day_data 中的股票）
+        if self.market_filter.get('exclude_st', False):
+            st_codes = self._get_st_filtered_codes()
+            if st_codes is not None:
+                mask &= ~day_data.index.isin(st_codes & stock_codes_in_data)
+        
+        # 2. 排除上市不满N个交易日（只检查当天在 day_data 中的股票）
+        min_days = self.market_filter.get('exclude_new_stock', 0)
+        if min_days > 0:
+            new_stock_codes = self._get_new_stock_filtered_codes(date, min_days, stock_codes_in_data)
+            if new_stock_codes is not None:
+                mask &= ~day_data.index.isin(new_stock_codes)
+        
+        # 3. 排除涨跌停
+        if self.market_filter.get('exclude_limit', False):
+            if 'pre_close' in day_data.columns:
+                pre_close = day_data['pre_close']
+                valid_pre = pre_close.notna() & (pre_close > 0)
+                mask &= ~((day_data['close'] >= pre_close * 1.095) & valid_pre)
+                mask &= ~((day_data['close'] <= pre_close * 0.905) & valid_pre)
+        
+        # 4. 排除停牌
+        if self.market_filter.get('exclude_suspend', False):
+            if 'suspend_flag' in day_data.columns:
+                mask &= (day_data['suspend_flag'] == 0)
+        
+        # 5. 排除零成交量
+        if self.market_filter.get('exclude_zero_vol', False):
+            if 'volume' in day_data.columns:
+                mask &= (day_data['volume'] > 0)
+        
+        return day_data[mask]
+    
+    def _get_st_filtered_codes(self) -> Optional[set]:
+        """获取ST股票代码集合（带缓存）"""
+        if self._st_filtered_codes is not None:
+            return self._st_filtered_codes
+        
+        try:
+            stock_info = self._load_stock_info()
+            if stock_info is None or stock_info.empty:
+                self._st_filtered_codes = set()
+                return self._st_filtered_codes
+            
+            st_codes = set()
+            for _, row in stock_info.iterrows():
+                name = str(row.get('stock_name', ''))
+                if 'ST' in name.upper():
+                    st_codes.add(row['stock_code'])
+            
+            self._st_filtered_codes = st_codes
+            return st_codes
+        except Exception:
+            self._st_filtered_codes = set()
+            return self._st_filtered_codes
+    
+    def _get_new_stock_filtered_codes(self, date: pd.Timestamp, min_days: int, check_codes: set = None) -> Optional[set]:
+        """获取上市交易日不满N天的股票代码集合（只检查指定股票）"""
+        try:
+            stock_info = self._load_stock_info()
+            if stock_info is None or stock_info.empty:
+                return set()
+            
+            # 只检查需要判断的股票（而非全市场）
+            if check_codes:
+                stock_info = stock_info[stock_info['stock_code'].isin(check_codes)]
+            
+            if stock_info.empty:
+                return set()
+            
+            trade_dt = date.strftime('%Y-%m-%d')
+            
+            # 获取需要检查的股票中最早的上市日期
+            list_dates = stock_info['list_date'].dropna().tolist()
+            if not list_dates:
+                return set()
+            
+            min_list_dt = min(str(d) for d in list_dates)
+            
+            # 加载交易日历（带缓存，只查一次数据库）
+            if self._trade_dates_cache is None:
+                db_path = self.strategy.params.get('db_path')
+                if not db_path:
+                    return set()
+                from src.data.database import DatabaseManager
+                db = DatabaseManager(db_path)
+                self._trade_dates_cache = db.get_trade_dates(min_list_dt, trade_dt)
+            
+            all_trade_dates = self._trade_dates_cache
+            
+            # 用二分查找计算交易日数量
+            import bisect
+            new_codes = set()
+            for _, row in stock_info.iterrows():
+                list_date = row.get('list_date')
+                if pd.notna(list_date) and list_date:
+                    try:
+                        list_dt = pd.Timestamp(list_date).strftime('%Y-%m-%d')
+                        if list_dt >= min_list_dt:
+                            idx = bisect.bisect_left(all_trade_dates, list_dt)
+                            trade_days = len(all_trade_dates) - idx
+                            if trade_days < min_days:
+                                new_codes.add(row['stock_code'])
+                    except Exception:
+                        pass
+            
+            return new_codes
+        except Exception:
+            return set()
+    
+    def _precompute_atr(self, data: pd.DataFrame, window: int = 14) -> Optional[Dict[str, Dict[str, float]]]:
+        """
+        预计算ATR（Average True Range）
+        
+        返回: {date_str: {stock_code: atr_value}}
+        """
+        if data is None or data.empty:
+            return None
+        
+        try:
+            atr_data = {}
+            
+            # 获取所有股票代码
+            try:
+                stock_codes = data.index.get_level_values('stock_code').unique()
+            except:
+                return None
+            
+            for stock_code in stock_codes:
+                try:
+                    # 获取单只股票数据
+                    stock_data = data.xs(stock_code, level='stock_code').copy()
+                    
+                    # 计算True Range
+                    stock_data['prev_close'] = stock_data['close'].shift(1)
+                    stock_data['tr'] = np.maximum(
+                        stock_data['high'] - stock_data['low'],
+                        np.maximum(
+                            abs(stock_data['high'] - stock_data['prev_close']),
+                            abs(stock_data['low'] - stock_data['prev_close'])
+                        )
+                    )
+                    
+                    # 计算ATR（指数移动平均）
+                    stock_data['atr'] = stock_data['tr'].ewm(span=window, adjust=False).mean()
+                    
+                    # 存入结果
+                    for date, row in stock_data.iterrows():
+                        date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
+                        if date_str not in atr_data:
+                            atr_data[date_str] = {}
+                        atr_data[date_str][stock_code] = row['atr']
+                        
+                except Exception:
+                    continue
+            
+            return atr_data
+        except Exception:
+            return None
+    
+    def _load_stock_info(self) -> Optional[pd.DataFrame]:
+        """加载股票基本信息（带缓存）"""
+        if self._stock_info_cache is not None:
+            return self._stock_info_cache
+        
+        try:
+            # 从 full_data 的 context 中获取数据库路径
+            # 通过 strategy 的 params 传入 db_path
+            db_path = self.strategy.params.get('db_path')
+            if not db_path:
+                self._stock_info_cache = pd.DataFrame()
+                return self._stock_info_cache
+            
+            from src.data.database import DatabaseManager
+            db = DatabaseManager(db_path)
+            self._stock_info_cache = db.get_stock_info_filtered()
+            return self._stock_info_cache
+        except Exception:
+            self._stock_info_cache = pd.DataFrame()
+            return self._stock_info_cache
 
     def _record_snapshot(self, date: pd.Timestamp, day_data: pd.DataFrame, drawdown: float):
         """记录每日快照"""

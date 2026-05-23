@@ -11,6 +11,8 @@ from .backtest_cli import (
     run_backtest_command,
     setup_result_parser,
     run_result_command,
+    setup_pool_parser,
+    run_pool_command,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     'run_backtest_command',
     'setup_result_parser',
     'run_result_command',
+    'setup_pool_parser',
+    'run_pool_command',
 ]

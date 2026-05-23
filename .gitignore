@@ -79,8 +79,8 @@ cython_debug/
 tests/test4.py
 AGENTS.MD
 
-# 策略代码（用户自定义策略，不提交git）
-src/strategies/
+# 用户自定义策略（不提交git，保留核心策略）
+src/strategies/user_*.py
 
 # IDE/工具
 .trae/

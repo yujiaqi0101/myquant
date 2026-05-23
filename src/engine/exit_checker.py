@@ -136,29 +136,34 @@ class ExitChecker:
         return ExitCheckResult(should_exit=False)
     
     def _check_trailing_stop(self, context: 'Context', position: 'Position') -> ExitCheckResult:
-        """检查动态跟踪止盈"""
+        """
+        检查ATR跟踪止盈（仅支持做多）
+        
+        做多：收盘价 < 最高价 - N×ATR 时卖出
+        """
         from .types import Direction
         
         trailing_stop = self.params.get('trailing_stop', 0)
         if trailing_stop <= 0:
             return ExitCheckResult(should_exit=False)
         
-        price = context.market_data.get(position.stock_code, {}).get('close', 0)
-        ma_col = f'ma_{trailing_stop}'
-        ma_val = context.market_data.get(position.stock_code, {}).get(ma_col, 0)
-        
-        if price <= 0 or ma_val <= 0:
+        # 仅支持做多
+        if position.direction != Direction.LONG:
             return ExitCheckResult(should_exit=False)
         
-        if position.direction == Direction.LONG and price < ma_val:
+        price = context.market_data.get(position.stock_code, {}).get('close', 0)
+        atr = context.market_data.get(position.stock_code, {}).get('atr', 0)
+        highest_price = position.highest_price
+        
+        if price <= 0 or atr <= 0 or highest_price <= 0:
+            return ExitCheckResult(should_exit=False)
+        
+        # ATR跟踪止盈：价格从最高点回落超过 N×ATR
+        threshold = highest_price - trailing_stop * atr
+        if price < threshold:
             return ExitCheckResult(
                 should_exit=True,
-                reason=f"动态止盈：收盘价 {price:.2f} 跌破 {trailing_stop} 日均线 {ma_val:.2f}"
-            )
-        if position.direction == Direction.SHORT and price > ma_val:
-            return ExitCheckResult(
-                should_exit=True,
-                reason=f"动态止盈：收盘价 {price:.2f} 超过 {trailing_stop} 日均线 {ma_val:.2f}"
+                reason=f"ATR跟踪止盈：收盘价 {price:.2f} < 最高价 {highest_price:.2f} - {trailing_stop}×ATR {atr:.2f}"
             )
         
         return ExitCheckResult(should_exit=False)
