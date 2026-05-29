@@ -1,0 +1,476 @@
+# CLI 使用说明
+
+## 概述
+
+A股量化分析系统采用多级命令结构，所有命令支持两种使用方式：
+
+- **交互式**：不带子命令参数时，自动进入交互式菜单，通过编号选择操作
+- **命令式**：直接指定子命令和参数，适合脚本和自动化场景
+
+基本格式：
+
+```bash
+python main.py <一级命令> [子命令] [参数...]
+```
+
+## 一级命令列表
+
+| 命令 | 说明 | 交互式入口 |
+|------|------|-----------|
+| `config` | 配置管理（Token、数据源、日志级别） | `python main.py config` |
+| `data` | 数据管理（同步、校验、生成、概览、清空） | `python main.py data` |
+| `factor` | 因子管理（查询、注册、测试） | `python main.py factor` |
+| `strategy` | 策略管理（列表、详情） | `python main.py strategy` |
+| `backtest` | 运行回测 | `python main.py backtest -s <策略名>` |
+| `pool` | 股票池管理（创建、查看、添加、删除） | `python main.py pool` |
+| `result` | 回测结果管理（列表、查看、导出、删除） | `python main.py result` |
+
+---
+
+## config 命令详解
+
+配置管理命令，用于设置东财掘金Token、QMT账号、默认数据源和日志级别。
+
+### 交互式
+
+```bash
+python main.py config
+```
+
+进入交互式菜单后，提供以下选项：
+
+| 编号 | 操作 | 说明 |
+|------|------|------|
+| 1 | 查看当前配置 | 显示已配置的Token、账号、数据源等信息 |
+| 2 | 配置东财掘金 Token | 输入Token字符串 |
+| 3 | 配置 QMT 账号 | 输入账号和密码 |
+| 4 | 配置数据源 | 选择 eastmoney / database / qmt |
+| 5 | 配置日志级别 | 选择 DEBUG / INFO / WARNING / ERROR |
+
+### 命令式
+
+```bash
+# 查看当前配置
+python main.py config --show
+
+# 设置东财掘金 Token
+python main.py config --token your_token_here
+
+# 设置 QMT 账号
+python main.py config --qmt-account your_account --qmt-password your_password
+
+# 设置默认数据源
+python main.py config --data-source eastmoney
+
+# 设置日志级别
+python main.py config --log-level DEBUG
+
+# 组合使用
+python main.py config --show --data-source eastmoney --log-level INFO
+```
+
+### 参数说明
+
+| 参数 | 说明 | 可选值 |
+|------|------|--------|
+| `--token` | 设置东财掘金 Token | 字符串 |
+| `--qmt-account` | 设置 QMT 账号 | 字符串 |
+| `--qmt-password` | 设置 QMT 密码 | 字符串 |
+| `--data-source` | 设置默认数据源 | `eastmoney` / `database` / `qmt` |
+| `--log-level` | 设置日志级别 | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `--show` | 显示当前配置 | 无需值 |
+
+### 配置文件
+
+配置信息存储在以下文件中：
+
+- 凭证文件：`config/credentials.json`（Token、账号、密码）
+- 配置文件：`config/config.json`（数据源、日志级别等）
+
+---
+
+## data 命令详解
+
+数据管理命令，提供数据同步、校验、生成测试数据、查看数据概览和清空数据功能。
+
+### 交互式
+
+```bash
+python main.py data
+```
+
+进入交互式菜单后，提供以下选项：
+
+| 编号 | 操作 | 说明 |
+|------|------|------|
+| 1 | 同步数据 | 选择数据源并同步 |
+| 2 | 校验数据完整性 | 检查数据质量 |
+| 3 | 生成测试数据 | 生成模拟CSV数据 |
+| 4 | 查看数据概览 | 显示数据库统计信息 |
+| 5 | 清空数据 | 删除数据库文件 |
+
+### 子命令
+
+#### data sync - 同步数据
+
+```bash
+# 从东财掘金同步
+python main.py data sync --source eastmoney --start-date 20230101
+
+# 从 QMT 同步
+python main.py data sync --source qmt --start-date 20230101 --end-date 20231231
+
+# 交互式选择数据源
+python main.py data sync
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--source` | 数据源 | 交互式选择 |
+| `--start-date` | 起始日期 (YYYYMMDD) | 20230101 |
+| `--end-date` | 结束日期 (YYYYMMDD) | 最新 |
+
+#### data validate - 校验数据完整性
+
+```bash
+python main.py data validate
+```
+
+#### data generate-test - 生成测试数据
+
+```bash
+# 默认参数
+python main.py data generate-test
+
+# 自定义参数
+python main.py data generate-test --n-stocks 200 --n-days 500
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--n-stocks` | 股票数量 | 100 |
+| `--n-days` | 交易天数 | 250 |
+
+#### data status - 查看数据概览
+
+```bash
+python main.py data status
+```
+
+输出内容包括：数据库路径、股票信息条数、日线数据范围、股票池列表及成员数。
+
+#### data clear - 清空数据
+
+```bash
+python main.py data clear
+```
+
+需要二次确认。将删除数据库文件，此操作不可恢复。
+
+---
+
+## factor 命令详解
+
+因子管理命令，提供因子查询、详情查看、计算测试和因子注册功能。
+
+### 交互式
+
+```bash
+python main.py factor
+```
+
+进入交互式菜单后，提供以下选项：
+
+| 编号 | 操作 | 说明 |
+|------|------|------|
+| 1 | 列出所有因子 | 按分类分组显示 |
+| 2 | 按分类查看因子 | 选择分类后显示 |
+| 3 | 搜索因子 | 按关键词搜索 |
+| 4 | 查看因子详情 | 输入因子名称查看完整信息 |
+| 5 | 测试因子计算 | 计算指定因子在指定日期的值 |
+| 6 | 注册新因子 | 添加自定义因子 |
+
+### 子命令
+
+#### factor list - 列出因子
+
+```bash
+# 列出所有因子
+python main.py factor list
+
+# 按分类筛选
+python main.py factor list --category valuation
+
+# 按数据源筛选
+python main.py factor list --source eastmoney
+
+# 按关键词搜索
+python main.py factor list --keyword "市盈率"
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--category` | 按分类筛选 |
+| `--source` | 按数据源筛选 |
+| `--keyword` | 按关键词搜索（匹配因子名和描述） |
+
+#### factor info - 查看因子详情
+
+```bash
+python main.py factor info --name pe_ratio
+```
+
+| 参数 | 说明 | 是否必填 |
+|------|------|---------|
+| `--name` | 因子名称 | 是 |
+
+输出内容：名称、分类、描述、API字段、数据来源、排名方向、支持的数据源。
+
+#### factor test - 测试因子计算
+
+```bash
+# 使用默认日期
+python main.py factor test --name pe_ratio
+
+# 指定日期
+python main.py factor test --name pe_ratio --date 2024-01-02
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--name` | 因子名称 | (必填) |
+| `--date` | 查询日期 (YYYY-MM-DD) | 交互式输入 |
+
+输出内容：有效股票数、均值、中位数、标准差、最值、Top5/Bottom5。
+
+#### factor register - 注册新因子
+
+```bash
+python main.py factor register \
+  --name custom_pe \
+  --field pe_ratio \
+  --category valuation \
+  --description "自定义市盈率因子" \
+  --ascending
+```
+
+| 参数 | 说明 | 是否必填 |
+|------|------|---------|
+| `--name` | 因子名称（英文） | 是 |
+| `--field` | API字段名 | 是 |
+| `--category` | 因子分类 | 是 |
+| `--description` | 因子描述 | 否 |
+| `--ascending` | 升序排名（越小越好） | 否（默认True） |
+
+---
+
+## backtest 命令详解
+
+运行回测命令，基于通用回测引擎执行策略回测。
+
+### 基本用法
+
+```bash
+# 必须指定策略
+python main.py backtest --strategy BreakoutPullbackStrategy
+
+# 使用股票池
+python main.py backtest -s BreakoutPullbackStrategy --pool CSI300
+
+# 指定股票列表
+python main.py backtest -s BreakoutPullbackStrategy --stocks 000001.SZ,600000.SH
+```
+
+### 核心参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `-s, --strategy` | 策略名称（必填） | - |
+| `--pool` | 股票池名称 | - |
+| `--stocks` | 股票代码列表（逗号分隔） | - |
+| `--start-date` | 回测开始日期 | 2024-01-01 |
+| `--end-date` | 回测结束日期 | 2024-12-31 |
+| `--initial-capital` | 初始资金 | 1000000 |
+| `--data-source` | 数据源 | database |
+
+### 交易参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--stop-loss` | 止损比例 | 0.07 |
+| `--take-profit` | 止盈比例（0=禁用） | 0 |
+| `--trailing-stop` | ATR跟踪止盈倍数（0=禁用） | 3 |
+| `--max-holding-days` | 最大持仓天数（0=不限） | 0 |
+| `--execution-price` | 执行价格 | close |
+| `--position-size` | 单次开仓资金比例 | 0.10 |
+| `--max-positions` | 最大持仓数量（0=不限） | 30 |
+| `--commission-rate` | 佣金费率 | 0.0003 |
+| `--slippage` | 滑点比例 | 0.0001 |
+
+### 风控参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--enable-risk-control` | 启用组合风控 | False |
+| `--portfolio-stop` | 组合止损比例 | 0.10 |
+
+### 市场过滤参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--exclude-st` | 排除ST股 | False |
+| `--exclude-new-stock N` | 排除上市不满N天的股票 | 0 |
+| `--exclude-limit` | 排除涨跌停股 | False |
+| `--exclude-suspend` | 排除停牌股 | False |
+| `--exclude-zero-vol` | 排除零成交量股 | False |
+
+### 输出参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--output-dir` | 报告输出目录 | reports |
+| `--name` | 报告名称（默认自动生成） | - |
+
+### 完整示例
+
+```bash
+python main.py backtest \
+  -s BreakoutPullbackStrategy \
+  --pool CSI300 \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --initial-capital 1000000 \
+  --stop-loss 0.07 \
+  --trailing-stop 3 \
+  --max-positions 20 \
+  --exclude-st \
+  --exclude-new-stock 60 \
+  --data-source eastmoney \
+  --output-dir reports/my_backtest
+```
+
+---
+
+## strategy 命令简介
+
+策略管理命令，查看可用策略及其参数说明。
+
+```bash
+# 列出所有可用策略
+python main.py strategy --list
+
+# 查看策略详情
+python main.py strategy --show BreakoutPullbackStrategy
+
+# 查看策略参数详细说明
+python main.py strategy --show BreakoutPullbackStrategy --params
+```
+
+| 参数 | 说明 |
+|------|------|
+| `-l, --list` | 列出所有可用策略 |
+| `-s, --show` | 查看策略详情（显示类注释和参数） |
+| `--params` | 显示参数详细说明（与 --show 配合） |
+
+---
+
+## pool 命令简介
+
+股票池管理命令，支持创建、查看、添加/移除成员、删除股票池。
+
+```bash
+# 列出所有股票池
+python main.py pool --list
+
+# 创建股票池
+python main.py pool --create tech_pool --code TECH --desc "科技股精选"
+
+# 从指数成分股创建
+python main.py pool --create CSI300 --import-index 000300.SH
+
+# 查看股票池详情
+python main.py pool --show tech_pool
+
+# 添加股票
+python main.py pool --add tech_pool --stocks 000001.SZ,600000.SH
+
+# 从CSV导入
+python main.py pool --add tech_pool --import-csv stocks.csv
+
+# 移除股票
+python main.py pool --remove tech_pool --stocks 000001.SZ
+
+# 删除股票池
+python main.py pool --delete tech_pool
+```
+
+| 参数 | 说明 |
+|------|------|
+| `-l, --list` | 列出所有股票池 |
+| `--create <名称>` | 创建股票池 |
+| `--code <代码>` | 股票池代码（与 --create 配合） |
+| `--desc <描述>` | 股票池描述（与 --create 配合） |
+| `--show <名称>` | 查看股票池详情和成员列表 |
+| `--delete <名称>` | 删除股票池 |
+| `--add <名称> --stocks <代码>` | 添加股票 |
+| `--remove <名称> --stocks <代码>` | 移除股票 |
+| `--import-csv <路径>` | 从CSV导入（与 --add 配合） |
+| `--import-index <指数代码>` | 从指数成分股创建（与 --create 配合） |
+
+---
+
+## result 命令简介
+
+回测结果管理命令，查看、导出、删除回测结果。
+
+```bash
+# 列出所有回测结果
+python main.py result --list
+
+# 查看回测结果摘要
+python main.py result --show reports/backtest_0100_2024-01-01_2024-12-31
+
+# 查看指定日期的详情
+python main.py result --show reports/backtest_0100_2024-01-01_2024-12-31 \
+  --date 2024-06-01 --detail trades
+
+# 导出交易记录
+python main.py result --export reports/backtest_0100_2024-01-01_2024-12-31 \
+  --output trades.csv
+
+# 生成 HTML 报告
+python main.py result --html reports/backtest_0100_2024-01-01_2024-12-31
+
+# 删除回测结果
+python main.py result --delete reports/backtest_0100_2024-01-01_2024-12-31
+```
+
+| 参数 | 说明 |
+|------|------|
+| `-l, --list` | 列出已有回测结果 |
+| `--show <路径>` | 查看回测结果摘要 |
+| `--date <日期>` | 查看指定日期详情（与 --show 配合） |
+| `--detail <类型>` | 详情类型：cashflow / positions / trades / all |
+| `--export <路径>` | 导出回测结果 |
+| `-o, --output` | 导出文件路径 |
+| `--html <路径>` | 生成 HTML 报告 |
+| `--delete <路径>` | 删除回测结果 |
+
+---
+
+## 旧命令兼容说明
+
+原有的单横线参数仍然可用，系统保持向后兼容：
+
+| 旧命令 | 等价新命令 | 说明 |
+|--------|-----------|------|
+| `python main.py --sync` | `python main.py data sync` | 同步数据 |
+| `python main.py --validate` | `python main.py data validate` | 校验数据 |
+| `python main.py --generate-test-data` | `python main.py data generate-test` | 生成测试数据 |
+| `python main.py --source test` | `python main.py config --data-source test` | 设置数据源 |
+| `python main.py --list-factors` | `python main.py factor list` | 列出因子 |
+| `python main.py --factor-detail WQ_001` | `python main.py factor info --name WQ_001` | 因子详情 |
+| `python main.py --quintile-backtest` | (仍可用) | 多因子分层回测V2 |
+| `python main.py --multi-factor-backtest` | (仍可用) | 多因子分批回测V1 |
+
+> **建议**：新功能请使用多级命令格式，旧命令将在后续版本中逐步废弃。

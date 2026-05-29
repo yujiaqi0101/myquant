@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 运行时生成的数据文件 - 只排除数据库文件，保留目录结构和CSV等数据
+*.db
+*.db-shm
+*.db-wal
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
+
+# 报告输出（运行时生成）
+reports/
+
+# 日志
+logs/
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境变量
+.env
+.env.local
+
+# 凭证配置（包含账号密码等敏感信息）
+config/credentials.json
+
+# Python构建产物
+*.egg-info/
+pip-wheel-metadata/
+build/
+dist/
+
+# 测试相关
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# MyPy类型检查缓存
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre类型检查器
+.pyre/
+
+# pytype静态类型分析器
+.pytype/
+
+# Cython调试符号
+cython_debug/
+
+# 临时测试文件
+tests/test4.py
+AGENTS.MD
+
+# 用户自定义策略（不提交git，保留核心策略）
+src/strategies/user_*.py
+
+# IDE/工具
+.trae/
