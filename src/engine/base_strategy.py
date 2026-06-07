@@ -235,17 +235,49 @@ class StrategyRegistry:
     
     @classmethod
     def auto_discover(cls, package_path: str = 'src.strategies'):
-        """自动发现策略目录下的所有策略"""
+        """
+        自动发现策略目录下的所有策略
+
+        支持两种目录结构：
+        1. 旧版（平铺）：src/strategies/<策略名>.py
+        2. 新版（ID目录）：src/strategies/<策略ID>/<策略名>_<版本>.py
+        """
         import importlib
+        import importlib.util
         import pkgutil
-        
+        import os
+        from pathlib import Path
+
         try:
             package = importlib.import_module(package_path)
+            package_dir = Path(package.__path__[0])
+
+            # ---- 新版: 扫描ID目录下的策略文件 ----
+            for item in package_dir.iterdir():
+                if not item.is_dir() or item.name.startswith('_'):
+                    continue
+                if item.name.startswith('__'):
+                    continue
+
+                # 查找版本化策略文件 (*_v*.py)
+                for py_file in sorted(item.glob('*_v*.py')):
+                    module_name = py_file.stem
+                    spec = importlib.util.spec_from_file_location(
+                        f"{package_path}.{item.name}.{module_name}",
+                        str(py_file),
+                    )
+                    if spec and spec.loader:
+                        try:
+                            module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(module)
+                        except Exception as e:
+                            print(f"加载策略模块 {item.name}/{module_name} 失败: {e}")
+
+            # ---- 旧版兼容: 平铺策略文件 ----
             for _, name, is_pkg in pkgutil.iter_modules(package.__path__):
                 if not is_pkg and not name.startswith('_'):
                     try:
-                        module = importlib.import_module(f"{package_path}.{name}")
-                        # 模块导入时会自动执行 @StrategyRegistry.register 装饰器
+                        importlib.import_module(f"{package_path}.{name}")
                     except Exception as e:
                         print(f"加载策略模块 {name} 失败: {e}")
         except ImportError as e:
