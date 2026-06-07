@@ -392,6 +392,41 @@ class EastmoneyConnector:
 
         return self._request_with_retry(stk_get_money_flow, **kwargs)
 
+    def get_daily_mktvalue(
+        self,
+        symbols: List[str],
+        fields: str = 'a_mv',
+        trade_date: str = None,
+    ) -> pd.DataFrame:
+        """
+        获取市值指标单日截面数据（如流通市值）
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            字段列表，如 'a_mv,tot_mv'
+        trade_date : str
+            查询日期 'YYYY-MM-DD'
+
+        Returns
+        -------
+        pd.DataFrame
+            市值指标数据
+        """
+        from gm.api import stk_get_daily_mktvalue_pt
+
+        kwargs = dict(
+            symbols=symbols,
+            fields=fields,
+            df=True,
+        )
+        if trade_date:
+            kwargs['trade_date'] = trade_date
+
+        return self._request_with_retry(stk_get_daily_mktvalue_pt, **kwargs)
+
     def get_industry_category(
         self,
         source: str = 'sw2021',

@@ -126,6 +126,8 @@ class FactorService:
 
         if source == FactorSource.VALUATION:
             result = self._provider.get_valuation(mq_symbols, field, date)
+        elif source == FactorSource.MKTVALUE:
+            result = self._provider.get_mktvalue(mq_symbols, field, date)
         else:
             result = self._provider.get_financial(mq_symbols, field, date)
 

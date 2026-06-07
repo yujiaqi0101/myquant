@@ -80,3 +80,4 @@ src/strategies/user_*.py
 
 # IDE/工具
 .trae/
+.claude/

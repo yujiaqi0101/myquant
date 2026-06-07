@@ -30,6 +30,7 @@ class FactorSource(Enum):
     """因子数据来源枚举"""
     VALUATION = "valuation"           # 估值接口（stk_get_daily_valuation_pt）
     FINANCIAL = "financial"           # 财务衍生接口（stk_get_finance_deriv_pt）
+    MKTVALUE = "mktvalue"             # 市值接口（stk_get_daily_mktvalue_pt）
 
 
 # 因子元数据注册表
@@ -125,19 +126,30 @@ FACTOR_REGISTRY: Dict[str, Dict[str, Any]] = {
     'np_growth_q': {
         'name': '净利润季度增长率',
         'source': FactorSource.FINANCIAL,
-        'field': 'np_growth_q',
+        'field': 'net_prof_yoy',
         'category': FactorCategory.GROWTH,
-        'description': '净利润季度同比增长率，越高越好',
+        'description': '净利润同比增长率，越高越好',
         'default_ascending': False,
         'data_sources': ['eastmoney'],
     },
     'revenue_growth_q': {
         'name': '营收季度增长率',
         'source': FactorSource.FINANCIAL,
-        'field': 'revenue_growth_q',
+        'field': 'inc_oper_yoy',
         'category': FactorCategory.GROWTH,
-        'description': '营业收入季度同比增长率，越高越好',
+        'description': '营业收入同比增长率，越高越好',
         'default_ascending': False,
+        'data_sources': ['eastmoney'],
+    },
+
+    # ========== 估值因子（扩展） ==========
+    'circ_mv': {
+        'name': '流通市值',
+        'source': FactorSource.MKTVALUE,
+        'field': 'a_mv',
+        'category': FactorCategory.VALUATION,
+        'description': 'A股流通市值，单位：元，越小越好',
+        'default_ascending': True,
         'data_sources': ['eastmoney'],
     },
 

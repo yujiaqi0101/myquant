@@ -82,6 +82,27 @@ class FactorProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_mktvalue(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
+        """
+        获取市值因子
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            字段名，如 'a_mv', 'tot_mv'
+        date : str
+            查询日期 'YYYY-MM-DD'
+
+        Returns
+        -------
+        Dict[str, float]
+            {stock_code: factor_value}
+        """
+        pass
+
 
 class EastmoneyFactorProvider(FactorProvider):
     """
@@ -165,6 +186,31 @@ class EastmoneyFactorProvider(FactorProvider):
             logger.error(f"获取股票列表失败: {e}")
             return []
 
+    def get_mktvalue(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
+        """获取市值因子"""
+        from src.data.symbol_converter import SymbolConverter
+
+        try:
+            df = self._connector.get_daily_mktvalue(
+                symbols=symbols,
+                fields=fields,
+                trade_date=date,
+            )
+
+            if df is None or df.empty:
+                return {}
+
+            result = {}
+            for _, row in df.iterrows():
+                code = SymbolConverter.to_internal(row['symbol'])
+                result[code] = row.get(fields, float('nan'))
+
+            return result
+
+        except Exception as e:
+            logger.error(f"获取市值因子失败: {e}")
+            return {}
+
 
 class DatabaseFactorProvider(FactorProvider):
     """
@@ -230,6 +276,13 @@ class DatabaseFactorProvider(FactorProvider):
         except Exception as e:
             logger.error(f"获取股票列表失败: {e}")
             return []
+
+    def get_mktvalue(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
+        """获取市值因子（数据库暂不支持）"""
+        raise NotImplementedError(
+            f"DatabaseFactorProvider 暂不支持市值因子: {fields}\n"
+            f"请使用 data_source='eastmoney' 获取该因子"
+        )
 
     def _calc_pb(self, symbols: List[str], date: str) -> Dict[str, float]:
         """计算市净率 PB = 股价 / 每股净资产"""
