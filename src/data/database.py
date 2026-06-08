@@ -431,6 +431,24 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_factor_registry_category ON factor_registry(category)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_factor_registry_source ON factor_registry(source)')
 
+            # ============ 策略版本表 ============
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id VARCHAR(32) NOT NULL,
+                    strategy_name VARCHAR(100) NOT NULL,
+                    version VARCHAR(20) NOT NULL DEFAULT 'v1',
+                    file_path VARCHAR(500) NOT NULL,
+                    is_active INTEGER DEFAULT 1,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(strategy_id, version)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_versions_name ON strategy_versions(strategy_name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_versions_active ON strategy_versions(is_active)')
+
             logger.info(f"数据库初始化完成: {self.db_path}")
 
     # ============ 股票日频数据操作 ============
@@ -2054,3 +2072,110 @@ class DatabaseManager:
             pass
 
         return self.add_to_stock_pool(pool_name, stock_codes)
+
+    # ============ 策略版本管理 ============
+
+    def register_strategy_version(
+        self,
+        strategy_id: str,
+        strategy_name: str,
+        version: str,
+        file_path: str,
+        description: str = "",
+        is_active: int = 1,
+    ) -> int:
+        """注册策略版本，返回记录ID"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                '''INSERT OR REPLACE INTO strategy_versions
+                   (strategy_id, strategy_name, version, file_path, is_active, description, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)''',
+                (strategy_id, strategy_name, version, file_path, is_active, description),
+            )
+            return cursor.lastrowid
+
+    def set_active_version(self, strategy_name: str, version: str) -> bool:
+        """设置策略的活跃版本（先全部标为0，再激活指定版本）"""
+        with self.get_connection() as conn:
+            conn.execute(
+                'UPDATE strategy_versions SET is_active = 0 WHERE strategy_name = ?',
+                (strategy_name,),
+            )
+            conn.execute(
+                '''UPDATE strategy_versions SET is_active = 1, updated_at = CURRENT_TIMESTAMP
+                   WHERE strategy_name = ? AND version = ?''',
+                (strategy_name, version),
+            )
+            return True
+
+    def get_active_strategies(self) -> pd.DataFrame:
+        """获取所有活跃策略（is_active=1）"""
+        with self.get_connection() as conn:
+            return pd.read_sql_query(
+                'SELECT * FROM strategy_versions WHERE is_active = 1 ORDER BY strategy_name',
+                conn,
+            )
+
+    def get_strategy_version(
+        self, strategy_name: str, version: str = None
+    ) -> Optional[Dict]:
+        """获取指定策略版本，version=None时返回活跃版本"""
+        with self.get_connection() as conn:
+            if version:
+                row = conn.execute(
+                    '''SELECT * FROM strategy_versions
+                       WHERE strategy_name = ? AND version = ?''',
+                    (strategy_name, version),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    '''SELECT * FROM strategy_versions
+                       WHERE strategy_name = ? AND is_active = 1''',
+                    (strategy_name,),
+                ).fetchone()
+            if row:
+                return dict(row)
+            return None
+
+    def list_strategy_versions(self, strategy_name: str = None) -> List[Dict]:
+        """列出策略所有版本"""
+        with self.get_connection() as conn:
+            if strategy_name:
+                rows = conn.execute(
+                    '''SELECT * FROM strategy_versions
+                       WHERE strategy_name = ? ORDER BY version DESC''',
+                    (strategy_name,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    'SELECT * FROM strategy_versions ORDER BY strategy_name, version DESC',
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def create_new_strategy_version(
+        self,
+        strategy_name: str,
+        new_version: str,
+        new_file_path: str,
+        description: str = "",
+    ) -> int:
+        """
+        创建新版本策略
+        基于同名策略的现有记录创建，保留相同的 strategy_id
+        """
+        existing = self.list_strategy_versions(strategy_name)
+        if not existing:
+            logger.error(f"策略 '{strategy_name}' 不存在，请先注册")
+            return -1
+
+        strategy_id = existing[0]['strategy_id']
+        # 新版本默认激活，旧版本标为未激活
+        self.set_active_version(strategy_name, new_version)
+        return self.register_strategy_version(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            version=new_version,
+            file_path=new_file_path,
+            description=description,
+            is_active=1,
+        )

@@ -164,29 +164,29 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
     parser.add_argument(
         '--stop-loss',
         type=float,
-        default=0.07,
-        help='止损比例（如0.07表示7%）'
+        default=None,
+        help='止损比例（如0.07表示7%，不指定则使用策略默认值）'
     )
     
     parser.add_argument(
         '--take-profit',
         type=float,
-        default=0,
-        help='止盈比例（如0.20表示20%，0表示禁用固定止盈）'
+        default=None,
+        help='止盈比例（如0.20表示20%，0表示禁用，不指定则使用策略默认值）'
     )
     
     parser.add_argument(
         '--trailing-stop',
         type=float,
-        default=3,
-        help='ATR跟踪止盈倍数（如3表示价格从最高点回落超过3×ATR时卖出，0=禁用）'
+        default=None,
+        help='ATR动态止盈倍数（如3表示价格从最高点回落超过3×ATR时卖出，0=禁用，不指定则使用策略默认值）'
     )
     
     parser.add_argument(
         '--max-holding-days',
         type=int,
-        default=0,
-        help='最大持仓天数 (默认0，表示禁用超时平仓)'
+        default=None,
+        help='最大持仓天数（0表示禁用，不指定则使用策略默认值）'
     )
     
     parser.add_argument(
@@ -288,18 +288,71 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         help='报告名称（默认自动生成）'
     )
 
+    # 数据源参数
+    parser.add_argument(
+        '--data-source',
+        type=str,
+        default=None,
+        choices=['database', 'eastmoney'],
+        help='数据源：database（本地数据库，默认）或 eastmoney（东财掘金API）'
+    )
 
-def load_price_data(start_date: str, end_date: str, stock_codes: List[str] = None, db_path: str = None) -> pd.DataFrame:
-    """加载价格数据 - 直接从数据库查询，避免加载全部数据"""
-    from src.data.database import DatabaseManager
-    
-    if db_path is None:
-        db_path = str(Path(__file__).parent.parent.parent / 'data' / 'aquant.db')
-    
-    db = DatabaseManager(db_path)
-    price_data = db.get_stock_daily(stock_codes=stock_codes, start_date=start_date, end_date=end_date)
-    
-    return price_data
+
+def load_price_data(
+    start_date: str,
+    end_date: str,
+    stock_codes: List[str] = None,
+    db_path: str = None,
+    data_source: str = None
+) -> pd.DataFrame:
+    """
+    加载价格数据 - 支持多数据源
+
+    Parameters
+    ----------
+    start_date : str
+        开始日期
+    end_date : str
+        结束日期
+    stock_codes : List[str], optional
+        股票代码列表
+    db_path : str, optional
+        数据库路径（database 数据源使用）
+    data_source : str, optional
+        数据源：'database' 或 'eastmoney'，默认从配置读取
+
+    Returns
+    -------
+    pd.DataFrame
+        价格数据
+    """
+    from config.config import get_data_source, DataSource, DATABASE_CONFIG
+    from src.data.loader import DataLoader
+
+    source = data_source or get_data_source()
+
+    if source == DataSource.EASTMONEY:
+        # 东财掘金数据源
+        print(f"  数据源: 东财掘金 API")
+        loader = DataLoader.from_eastmoney(
+            start_date=start_date,
+            end_date=end_date,
+            stock_codes=stock_codes,
+        )
+        return loader.get_price_data(
+            stock_codes=stock_codes,
+            start_date=start_date,
+            end_date=end_date
+        )
+    else:
+        # 本地数据库数据源（默认）
+        from src.data.database import DatabaseManager
+
+        if db_path is None:
+            db_path = DATABASE_CONFIG.get("path", str(Path(__file__).parent.parent.parent / 'data' / 'aquant.db'))
+
+        db = DatabaseManager(db_path)
+        return db.get_stock_daily(stock_codes=stock_codes, start_date=start_date, end_date=end_date)
 
 
 def run_backtest_command(args: argparse.Namespace):
@@ -323,8 +376,6 @@ def run_backtest_command(args: argparse.Namespace):
     warmup_days = 0
     if 'consolidation_window' in param_schema:
         warmup_days = max(warmup_days, param_schema['consolidation_window'].get('default', 20))
-    if 'trailing_stop' in param_schema:
-        warmup_days = max(warmup_days, param_schema['trailing_stop'].get('default', 3))
     warmup_days = max(warmup_days, 20)  # 最小20天
     
     # 4. 构建策略参数
@@ -346,30 +397,34 @@ def run_backtest_command(args: argparse.Namespace):
                 print(f"  已自动调整为 {auto_position_size:.4f}")
                 position_size = auto_position_size
     
+    # 5. 创建策略实例
+    # 只传递用户显式指定的参数，未指定的使用策略 default_params
     strategy_params = {
-        'stop_loss': args.stop_loss,
-        'take_profit': args.take_profit,
-        'trailing_stop': args.trailing_stop,
-        'max_holding_days': args.max_holding_days,
         'position_size': position_size,
         'max_positions': max_positions,
         'commission_rate': args.commission_rate,
         'slippage': args.slippage,
-        'db_path': _get_db_path(),  # 供引擎加载 stock_info 做过滤
+        'db_path': _get_db_path(),  # 保持兼容
     }
-    
-    # 5. 创建策略实例
+    # 用户显式指定的出场参数才覆盖策略默认值
+    if args.stop_loss is not None:
+        strategy_params['stop_loss'] = args.stop_loss
+    if args.take_profit is not None:
+        strategy_params['take_profit'] = args.take_profit
+    if args.trailing_stop is not None:
+        strategy_params['trailing_stop'] = args.trailing_stop
+    if args.max_holding_days is not None:
+        strategy_params['max_holding_days'] = args.max_holding_days
+
     strategy = strategy_class(**strategy_params)
-    
-    # 6. 创建引擎
+
+    # 6. 创建引擎（先不注入 stock_info_provider，后面再设置）
     risk_controller = None
     if args.enable_risk_control:
         risk_controller = RiskController(
-            stop_loss=args.stop_loss,
-            take_profit=args.take_profit,
             portfolio_stop=args.portfolio_stop,
         )
-    
+
     # 构建市场过滤配置
     market_filter = {}
     if args.exclude_st:
@@ -382,28 +437,54 @@ def run_backtest_command(args: argparse.Namespace):
         market_filter['exclude_suspend'] = True
     if args.exclude_zero_vol:
         market_filter['exclude_zero_vol'] = True
-    
+
     engine = BacktestEngine(
         strategy=strategy,
         initial_capital=args.initial_capital,
-        enable_engine_exit=True,
         risk_controller=risk_controller,
         execution_price=args.execution_price,
         market_filter=market_filter,
     )
-    
-    # 7. 确定股票范围
+
+    # 7. 确定股票范围和数据源
     stock_codes = None
     pool_name = None
+
+    # 优先使用 CLI 参数，其次环境变量/配置
+    from config.config import get_data_source, DataSource
+    source = args.data_source or get_data_source()
 
     if args.pool and args.stocks:
         print("错误：--pool 和 --stocks 不能同时使用")
         return
 
     if args.pool:
+        # 从本地数据库获取股票池（所有数据源统一使用数据库中的股票池定义）
         from src.data.database import DatabaseManager
         db = DatabaseManager(_get_db_path())
         stock_codes = db.get_stock_pool_members(args.pool)
+        
+        # 如果数据库中没有，且是 eastmoney 数据源，尝试从 API 获取指数成分股
+        if not stock_codes and source == DataSource.EASTMONEY:
+            from config.config import get_credentials
+            from src.data.eastmoney_connector import EastmoneyConnector
+
+            token = get_credentials('eastmoney').get('token', '')
+            connector = EastmoneyConnector(token=token)
+            # 将股票池名称映射到指数代码（如 'test' -> '000300.SH'）
+            pool_to_index = {
+                'test': '000300.SH',  # 沪深300
+                '沪深300': '000300.SH',
+                'csi300': '000300.SH',
+                'csi500': '000905.SH',
+                'sse50': '000016.SH',
+            }
+            index_code = pool_to_index.get(args.pool, args.pool)
+            try:
+                stock_codes = connector.get_index_constituents(index_code, args.start_date)
+            except Exception as e:
+                logger.warning(f"从API获取指数成分股失败: {e}")
+
         if not stock_codes:
             print(f"错误：股票池 '{args.pool}' 不存在或为空")
             return
@@ -425,15 +506,30 @@ def run_backtest_command(args: argparse.Namespace):
         print(f"  股票列表: {len(stock_codes)} 只")
     
     # 加载完整数据（预热期+回测期）
-    full_data = load_price_data(warmup_start, args.end_date, stock_codes=stock_codes)
+    full_data = load_price_data(warmup_start, args.end_date, stock_codes=stock_codes, data_source=source)
     
     # 分离预热期和回测期数据
     warmup_data = full_data[full_data.index.get_level_values('trade_date') < args.start_date]
     price_data = full_data[full_data.index.get_level_values('trade_date') >= args.start_date]
     
     print(f"  加载完成: {len(full_data)} 条记录")
-    
-    # 8. 运行回测
+
+    # 8. 设置 stock_info_provider（数据加载后）
+    from src.data.stock_info_provider import DatabaseStockInfoProvider, EastmoneyStockInfoProvider
+    if source == DataSource.EASTMONEY:
+        # 使用已加载的 eastmoney adapter（通过 DataLoader 缓存）
+        # 避免重复创建，直接新建一个 provider 指向相同的 adapter
+        from src.data.eastmoney_adapter import EastmoneyAdapter
+        from config.config import get_credentials
+        token = get_credentials('eastmoney').get('token', '')
+        adapter = EastmoneyAdapter(token=token)
+        # 只加载股票列表（不重复加载价格数据）
+        adapter.load_stock_list()
+        engine._stock_info_provider = EastmoneyStockInfoProvider(adapter)
+    else:
+        engine._stock_info_provider = DatabaseStockInfoProvider(_get_db_path())
+
+    # 9. 运行回测
     print(f"\n开始回测...")
     result = engine.run(price_data, warmup_data)
     

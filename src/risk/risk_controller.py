@@ -2,13 +2,14 @@
 风控控制器
 =========
 
-在回测过程中实时监控和执行风控规则。
+在回测过程中实时监控和执行组合层面风控规则。
 
 支持的风控类型：
-1. 个股止损/止盈 - 单只股票盈亏阈值
-2. 组合止损 - 组合整体回撤阈值
-3. 仓位限制 - 单股/行业最大仓位
-4. 波动率控制 - 基于波动率动态调整仓位
+1. 组合止损 - 组合整体回撤阈值
+2. 仓位限制 - 单股/行业最大仓位
+3. 波动率控制 - 基于波动率动态调整仓位
+
+注：个股止损止盈已移至策略层，由策略通过 exit_checker 方法实现。
 """
 
 import logging
@@ -64,23 +65,21 @@ class RiskEvent:
 
 class RiskController:
     """
-    风控控制器
+    风控控制器 - 组合层面风控
     
-    在回测过程中实时监控风险指标，触发风控规则时执行相应操作。
+    在回测过程中实时监控组合风险指标，触发风控规则时执行相应操作。
+    
+    注：个股止损止盈已移至策略层，由策略通过 exit_checker 方法实现。
     """
     
     def __init__(
         self,
-        stop_loss: float = 0.07,           # 个股止损比例（-7%）
-        take_profit: float = 0.20,         # 个股止盈比例（+20%）
         portfolio_stop: float = 0.10,      # 组合止损比例（-10%）
         max_position_per_stock: float = 0.10,  # 单股最大仓位（10%）
         max_position_per_industry: float = 0.30,  # 行业最大仓位（30%）
         volatility_lookback: int = 20,     # 波动率计算回看天数
         volatility_target: Optional[float] = None,  # 目标波动率
         risk_action: str = "close",        # 默认操作：close/reduce/halt
-        enable_stop_loss: bool = True,
-        enable_take_profit: bool = True,
         enable_portfolio_stop: bool = True,
         enable_position_limit: bool = True,
     ):
@@ -89,10 +88,6 @@ class RiskController:
         
         Parameters
         ----------
-        stop_loss : float
-            个股止损比例，默认0.07（-7%）
-        take_profit : float
-            个股止盈比例，默认0.20（+20%）
         portfolio_stop : float
             组合止损比例，默认0.10（-10%）
         max_position_per_stock : float
@@ -107,24 +102,6 @@ class RiskController:
             风控触发后的默认操作：'close'/'reduce'/'halt'
         """
         self.rules = {}
-        
-        # 个股止损
-        if enable_stop_loss and stop_loss > 0:
-            self.rules[RiskRuleType.STOP_LOSS] = RiskRule(
-                rule_type=RiskRuleType.STOP_LOSS,
-                threshold=-stop_loss,  # 负值表示亏损
-                action=RiskAction(risk_action),
-                enabled=True
-            )
-        
-        # 个股止盈
-        if enable_take_profit and take_profit > 0:
-            self.rules[RiskRuleType.TAKE_PROFIT] = RiskRule(
-                rule_type=RiskRuleType.TAKE_PROFIT,
-                threshold=take_profit,
-                action=RiskAction(risk_action),
-                enabled=True
-            )
         
         # 组合止损
         if enable_portfolio_stop and portfolio_stop > 0:
@@ -212,7 +189,10 @@ class RiskController:
         industry: Optional[str] = None
     ) -> Tuple[RiskAction, float, str]:
         """
-        检查个股风险
+        [已废弃] 个股风控检查已移至策略层
+
+        请使用策略的 exit_checker 方法替代。
+        保留此方法用于向后兼容，直接返回 NONE。
         
         Parameters
         ----------
@@ -232,71 +212,6 @@ class RiskController:
         Tuple[RiskAction, float, str]
             (操作类型, 目标仓位, 原因)
         """
-        # 检查是否在暂停列表中
-        if stock_code in self.halted_stocks:
-            return RiskAction.HALT, current_position, "股票已被暂停交易"
-        
-        # 检查是否有持仓成本记录
-        if stock_code not in self.entry_prices:
-            return RiskAction.NONE, current_position, ""
-        
-        entry_price = self.entry_prices[stock_code]['price']
-        pnl_ratio = (current_price - entry_price) / entry_price
-        
-        # 检查止损
-        if RiskRuleType.STOP_LOSS in self.rules:
-            rule = self.rules[RiskRuleType.STOP_LOSS]
-            if rule.enabled and pnl_ratio <= rule.threshold:
-                event = RiskEvent(
-                    date=date,
-                    rule_type=RiskRuleType.STOP_LOSS,
-                    stock_code=stock_code,
-                    trigger_value=pnl_ratio,
-                    threshold=rule.threshold,
-                    action=rule.action,
-                    position_before=current_position,
-                    position_after=0.0 if rule.action == RiskAction.CLOSE else current_position * 0.5,
-                    reason=f"个股止损触发：盈亏比例 {pnl_ratio:.2%} <= 阈值 {rule.threshold:.2%}"
-                )
-                self.events.append(event)
-                self.halted_stocks.add(stock_code)
-                
-                logger.warning(f"[{date}] {stock_code} 触发止损: {pnl_ratio:.2%}")
-                
-                if rule.action == RiskAction.CLOSE:
-                    return RiskAction.CLOSE, 0.0, event.reason
-                elif rule.action == RiskAction.REDUCE:
-                    return RiskAction.REDUCE, current_position * 0.5, event.reason
-                else:
-                    return RiskAction.HALT, current_position, event.reason
-        
-        # 检查止盈
-        if RiskRuleType.TAKE_PROFIT in self.rules:
-            rule = self.rules[RiskRuleType.TAKE_PROFIT]
-            if rule.enabled and pnl_ratio >= rule.threshold:
-                event = RiskEvent(
-                    date=date,
-                    rule_type=RiskRuleType.TAKE_PROFIT,
-                    stock_code=stock_code,
-                    trigger_value=pnl_ratio,
-                    threshold=rule.threshold,
-                    action=rule.action,
-                    position_before=current_position,
-                    position_after=0.0 if rule.action == RiskAction.CLOSE else current_position * 0.5,
-                    reason=f"个股止盈触发：盈亏比例 {pnl_ratio:.2%} >= 阈值 {rule.threshold:.2%}"
-                )
-                self.events.append(event)
-                self.halted_stocks.add(stock_code)
-                
-                logger.warning(f"[{date}] {stock_code} 触发止盈: {pnl_ratio:.2%}")
-                
-                if rule.action == RiskAction.CLOSE:
-                    return RiskAction.CLOSE, 0.0, event.reason
-                elif rule.action == RiskAction.REDUCE:
-                    return RiskAction.REDUCE, current_position * 0.5, event.reason
-                else:
-                    return RiskAction.HALT, current_position, event.reason
-        
         return RiskAction.NONE, current_position, ""
     
     def check_portfolio_risk(

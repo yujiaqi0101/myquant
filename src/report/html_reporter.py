@@ -106,8 +106,8 @@ class HTMLReporter:
         {self._build_summary()}
         {self._build_charts()}
         {self._build_trades_table()}
-        {self._build_stock_detail()}
         {self._build_daily_snapshots()}
+        {self._build_stock_detail()}
     </div>
     <script>
         {self._get_javascript()}
@@ -417,6 +417,71 @@ class HTMLReporter:
             color: #999;
             font-size: 14px;
         }
+
+        /* 每日快照可点击行 */
+        .snapshot-row {
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .snapshot-row:hover {
+            background: #e6f7ff !important;
+        }
+        .snapshot-row.active {
+            background: #bae7ff !important;
+            font-weight: 500;
+        }
+
+        /* 当日持仓弹出面板 */
+        .day-positions-panel {
+            display: none;
+            margin-top: 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .day-positions-panel.visible {
+            display: block;
+        }
+        .day-positions-header {
+            background: #e6f7ff;
+            padding: 10px 16px;
+            font-weight: 600;
+            font-size: 14px;
+            border-bottom: 1px solid #d9d9d9;
+        }
+        .day-positions-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .day-position-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 16px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .day-position-item:hover {
+            background: #f5f7fa;
+        }
+        .day-position-item:last-child {
+            border-bottom: none;
+        }
+        .day-pos-code {
+            font-weight: 600;
+            color: #1a1a2e;
+            min-width: 100px;
+        }
+        .day-pos-qty {
+            color: #666;
+            font-size: 13px;
+        }
+        .day-pos-hint {
+            color: #999;
+            font-size: 12px;
+            font-style: italic;
+        }
         
         @media (max-width: 768px) {
             .stock-detail-container {
@@ -652,7 +717,7 @@ class HTMLReporter:
         """
 
     def _build_daily_snapshots(self) -> str:
-        """构建每日快照表格"""
+        """构建每日快照表格（可点击查看当日持仓）"""
         if not self.snapshots:
             return ""
 
@@ -661,21 +726,23 @@ class HTMLReporter:
             total_value = snap.get('total_value', 0)
             daily_return = snap.get('daily_return', 0)
             return_class = "pnl-positive" if daily_return > 0 else "pnl-negative" if daily_return < 0 else ""
+            date = snap.get('date', '-')
+            n_pos = snap.get('n_positions', 0)
 
             rows.append(f"""
-                <tr>
-                    <td>{snap.get('date', '-')}</td>
+                <tr class="snapshot-row" onclick="showDayPositions('{date}')" data-date="{date}">
+                    <td>{date}</td>
                     <td>¥{snap.get('cash', 0):,.2f}</td>
                     <td>¥{snap.get('position_value', 0):,.2f}</td>
                     <td>¥{total_value:,.2f}</td>
                     <td class="{return_class}">{daily_return:+.2%}</td>
-                    <td>{snap.get('n_positions', 0)}</td>
+                    <td>{n_pos}</td>
                 </tr>
             """)
 
         return f"""
         <div class="card">
-            <div class="card-title">每日账户快照 ({len(self.snapshots)} 天)</div>
+            <div class="card-title">每日账户快照 ({len(self.snapshots)} 天) <span class="day-pos-hint">— 点击行查看当日持仓</span></div>
             <div class="table-container">
                 <table class="trades-table">
                     <thead>
@@ -692,6 +759,10 @@ class HTMLReporter:
                         {''.join(rows)}
                     </tbody>
                 </table>
+            </div>
+            <div id="dayPositionsPanel" class="day-positions-panel">
+                <div class="day-positions-header" id="dayPositionsHeader">当日持仓</div>
+                <div class="day-positions-list" id="dayPositionsList"></div>
             </div>
         </div>
         """
@@ -794,15 +865,92 @@ class HTMLReporter:
             document.querySelectorAll('.stock-item').forEach(el => {{
                 el.classList.remove('active');
             }});
-            document.querySelector(`.stock-item[data-stock="${{stockCode}}"]`).classList.add('active');
-            
+            const stockEl = document.querySelector(`.stock-item[data-stock="${{stockCode}}"]`);
+            if (stockEl) {{
+                stockEl.classList.add('active');
+                // 滚动到可见区域
+                stockEl.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+            }}
+
             selectedStock = stockCode;
-            
+
             // 绘制K线图
             drawKlineChart(stockCode);
-            
+
             // 显示交易明细
             showStockTrades(stockCode);
+        }}
+
+        // ---- 每日持仓：从交易记录重建任意日期的持仓 ----
+        function getPositionsAtDate(date) {{
+            let positions = {{}};
+            for (let trade of tradesData) {{
+                if (trade.date > date) continue;
+                if (trade.action === 'open') {{
+                    if (!positions[trade.stock_code]) {{
+                        positions[trade.stock_code] = {{
+                            code: trade.stock_code,
+                            qty: 0,
+                            cost: 0
+                        }};
+                    }}
+                    let p = positions[trade.stock_code];
+                    p.qty += trade.quantity;
+                    p.cost += trade.price * trade.quantity;
+                }} else if (trade.action === 'close') {{
+                    let p = positions[trade.stock_code];
+                    if (p) {{
+                        p.qty -= trade.quantity;
+                        if (p.qty <= 0) delete positions[trade.stock_code];
+                    }}
+                }}
+            }}
+            return Object.values(positions);
+        }}
+
+        // ---- 展示当日持仓列表 ----
+        function showDayPositions(date) {{
+            // 更新快照行高亮
+            document.querySelectorAll('.snapshot-row').forEach(el => el.classList.remove('active'));
+            const row = document.querySelector(`.snapshot-row[data-date="${{date}}"]`);
+            if (row) {{
+                row.classList.add('active');
+                row.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+            }}
+
+            let positions = getPositionsAtDate(date);
+            let panel = document.getElementById('dayPositionsPanel');
+            let header = document.getElementById('dayPositionsHeader');
+            let listEl = document.getElementById('dayPositionsList');
+
+            if (positions.length === 0) {{
+                header.textContent = `${{date}} 当日持仓 — 空仓`;
+                listEl.innerHTML = '<div class="day-position-item"><span class="day-pos-hint">当日无持仓</span></div>';
+            }} else {{
+                header.textContent = `${{date}} 当日持仓 — ${{positions.length}} 只股票`;
+                let html = '';
+                positions.sort((a, b) => b.cost - a.cost);  // 按成本降序
+                for (let p of positions) {{
+                    let avgPrice = (p.cost / p.qty).toFixed(2);
+                    html += `<div class="day-position-item" onclick="selectStock('${{p.code}}')" title="点击跳转到个股明细">
+                        <span class="day-pos-code">${{p.code}}</span>
+                        <span class="day-pos-qty">${{p.qty.toLocaleString()}} 股 | 均价 ¥${{avgPrice}}</span>
+                    </div>`;
+                }}
+                listEl.innerHTML = html;
+            }}
+
+            panel.classList.add('visible');
+
+            // 滚动到持仓面板
+            setTimeout(() => {{
+                panel.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+            }}, 100);
+
+            // 如果选中的股票在当日持仓中，自动高亮
+            if (selectedStock && positions.some(p => p.code === selectedStock)) {{
+                // 保持当前选中
+            }}
         }}
         
         // 绘制K线图（简化版：使用收盘价折线图+买卖点标记）

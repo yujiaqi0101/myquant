@@ -13,36 +13,32 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
+def _load_config_json() -> dict:
+    """加载 config/config.json 配置文件（模块级缓存，仅加载一次）"""
+    config_path = PROJECT_ROOT / "config" / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+# 模块级配置缓存（仅加载一次）
+_CONFIG = _load_config_json()
+
+
 def _load_credentials() -> dict:
     """
-    从 config/credentials.json 加载凭证信息
-
-    凭证文件为JSON格式，示例：
-    {
-        "qmt": {
-            "account": "你的账号",
-            "password": "你的密码"
-        }
-    }
-
-    优先级：环境变量 > credentials.json > 空字符串
+    从 config/config.json 的 credentials 字段加载凭证信息
 
     Returns
     -------
     dict
-        凭证字典，如 {"qmt": {"account": "...", "password": "..."}}
+        凭证字典，如 {"qmt": {"account": "...", ...}, "eastmoney": {"token": "..."}}
     """
-    cred_path = PROJECT_ROOT / "config" / "credentials.json"
-    credentials = {}
-
-    if cred_path.exists():
-        try:
-            with open(cred_path, 'r', encoding='utf-8') as f:
-                credentials = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"读取凭证文件失败: {e}")
-
-    return credentials
+    return _CONFIG.get("credentials", {})
 
 
 # 加载凭证（模块级别，仅加载一次）
@@ -53,12 +49,12 @@ def get_credentials(service: str = 'qmt') -> dict:
     """
     获取指定服务的凭证信息
 
-    优先级：环境变量 > credentials.json
+    优先级：环境变量 > config.json credentials 字段
 
     Parameters
     ----------
     service : str
-        服务名称，如 'qmt'
+        服务名称，如 'qmt', 'eastmoney'
 
     Returns
     -------
@@ -73,6 +69,11 @@ def get_credentials(service: str = 'qmt') -> dict:
         password = os.environ.get("QMT_PASSWORD", creds.get("password", ""))
         qmt_path = os.environ.get("QMT_PATH", creds.get("path", ""))
         return {"account": account, "password": password, "path": qmt_path}
+
+    if service == 'eastmoney':
+        # 东财掘金 token，环境变量优先
+        token = os.environ.get("EASTMONEY_TOKEN", creds.get("token", ""))
+        return {"token": token}
 
     return creds
 
@@ -102,6 +103,63 @@ class DataMode:
     TEST = "test"      # 测试数据模式
     REAL = "real"      # 真实数据模式
     AUTO = "auto"      # 自动检测模式
+
+# ============================================================
+# 数据源配置（新增）
+# ============================================================
+# AQUANT_DATA_SOURCE 环境变量控制数据来源
+# 可选值：
+#   - "database": 本地 SQLite 数据库（默认）
+#   - "eastmoney": 东财掘金 API
+#
+# 示例：
+#   Linux/Mac:  export AQUANT_DATA_SOURCE=eastmoney
+#   Windows:    set AQUANT_DATA_SOURCE=eastmoney
+#
+DATA_SOURCE_CONFIG = {
+    "source": os.environ.get("AQUANT_DATA_SOURCE", "database"),
+}
+
+# 数据源常量
+class DataSource:
+    DATABASE = "database"      # 本地 SQLite 数据库
+    EASTMONEY = "eastmoney"    # 东财掘金 API
+
+def get_data_source() -> str:
+    """
+    获取当前数据源
+
+    优先级：环境变量 AQUANT_DATA_SOURCE > config.json > 默认值 'database'
+
+    Returns
+    -------
+    str
+        数据源：'database' 或 'eastmoney'
+    """
+    # 1. 环境变量（最高优先级）
+    env_source = os.environ.get("AQUANT_DATA_SOURCE")
+    if env_source:
+        return env_source
+
+    # 2. config.json 配置文件
+    file_source = _CONFIG.get("data_source", {}).get("source")
+    if file_source:
+        return file_source
+
+    # 3. 默认值
+    return DATA_SOURCE_CONFIG["source"]
+
+# 东财掘金配置（token 从 config.json credentials 字段读取）
+EASTMONEY_CONFIG = {
+    "enabled": False,
+    "default_frequency": "1d",
+    "default_adjust": 1,              # 前复权 ADJUST_PREV=1
+    "max_rows_per_request": 33000,
+    "request_interval": 0.5,          # 流控间隔（秒）
+    "retry_attempts": 3,
+    "retry_interval": 2.0,
+    "cache_enabled": True,
+}
 
 def get_data_mode() -> str:
     """
@@ -170,8 +228,8 @@ DATABASE_CONFIG = {
 _QMT_CREDS = get_credentials('qmt')
 QMT_CONFIG = {
     "enabled": False,              # 是否启用QMT数据源
-    "account": _QMT_CREDS.get("account", ""),  # 从credentials.json或环境变量读取
-    "password": _QMT_CREDS.get("password", ""),  # 从credentials.json或环境变量读取
+    "account": _QMT_CREDS.get("account", ""),  # 从config.json或环境变量读取
+    "password": _QMT_CREDS.get("password", ""),  # 从config.json或环境变量读取
     "path": _QMT_CREDS.get("path", ""),  # QMT安装目录下userdata_mini路径
     "default_start_date": "20230101",  # 默认数据起始日期
     "data_types": ["stock", "index", "etf", "fund"],  # 要同步的数据类型

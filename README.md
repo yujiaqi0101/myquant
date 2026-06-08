@@ -97,6 +97,20 @@
 - **估值结果持久化**：支持历史估值回溯
 - **新闻情感分析接口**：预留NLP扩展接口
 
+### 🔗 东财掘金数据源
+- 通过东财掘金API获取股票、指数、基金、ETF行情数据
+- 股票列表和基础信息获取
+- 指数成分股查询
+- 财务数据（估值指标、财务报表）获取
+- 代码转换器（东财代码 <-> 标准代码）
+- 股票信息提供者（统一接口适配多数据源）
+
+### 🧩 策略级因子服务
+- **因子注册表**：统一管理因子元数据（名称、分类、数据源、API字段）
+- **因子服务**：策略级因子查询，支持按日期获取全市场因子值
+- **因子提供者**：对接东财掘金API，提供估值/财务类因子数据
+- **策略集成**：PB-ROE月度调仓策略示例，演示因子服务在策略中的使用
+
 ### 🔗 国金QMT集成
 - 通过QMT接口获取股票、指数、基金、ETF真实行情数据
 - 自动同步合约基本信息（名称、行业、市值、股本等）
@@ -141,7 +155,7 @@
 aquant/
 ├── config/                 # 配置文件
 │   ├── config.py          # 主配置文件
-│   └── credentials.json   # 敏感信息（账号密码等）
+│   └── config.json        # 统一配置（数据源、账号密码等）
 ├── data/                   # 数据目录
 │   ├── aquant.db          # SQLite数据库（存储真实数据）
 │   └── test_data/         # 测试数据目录（CSV文件）
@@ -159,6 +173,10 @@ aquant/
 │   │   ├── test_data_generator.py  # 测试数据生成器（CSV导出）
 │   │   ├── qmt_connector.py  # QMT接口连接器
 │   │   ├── qmt_adapter.py    # QMT数据适配器
+│   │   ├── eastmoney_connector.py  # 东财掘金API连接器
+│   │   ├── eastmoney_adapter.py    # 东财掘金数据适配器
+│   │   ├── symbol_converter.py     # 代码转换器（东财<->标准）
+│   │   ├── stock_info_provider.py  # 股票信息提供者（统一接口）
 │   │   ├── data_sync.py      # 数据同步模块
 │   │   └── data_validator.py # 数据校验模块
 │   ├── factors/           # 因子模块
@@ -168,6 +186,9 @@ aquant/
 │   │   ├── fundamental.py # 基本面因子
 │   │   ├── categories.py  # 因子分类系统
 │   │   ├── selector.py    # 因子筛选器
+│   │   ├── factor_service.py   # 策略级因子服务
+│   │   ├── factor_provider.py  # 因子数据提供者
+│   │   ├── factor_registry.py  # 因子注册表
 │   │   ├── backtest.py    # 回测器
 │   │   ├── report_generator.py  # HTML报告生成器
 │   │   ├── execution_logger.py  # 执行日志记录器
@@ -185,6 +206,15 @@ aquant/
 │   │   └── data_generator.py  # 成分股数据生成器
 │   ├── risk/              # 风控模块
 │   │   └── risk_manager.py
+│   ├── strategies/        # 策略模块
+│   │   ├── breakout_pullback.py  # 突破回踩策略
+│   │   └── pb_roe_monthly.py     # PB-ROE月度调仓策略
+│   ├── cli/               # 命令行模块
+│   │   ├── config_cli.py  # 配置管理命令
+│   │   ├── data_cli.py    # 数据管理命令
+│   │   ├── factor_cli.py  # 因子管理命令
+│   │   ├── backtest_cli.py # 回测/策略/结果/股票池命令
+│   │   └── interactive.py # 交互式菜单框架
 │   ├── valuation/         # 估值分析模块
 │   │   ├── analyzer.py    # 估值分析主入口
 │   │   ├── calculator/    # 估值计算器
@@ -209,6 +239,10 @@ aquant/
 ├── tests/                  # 测试文件
 │   ├── test_all.py
 │   └── test_database.py
+├── documents/              # 文档目录
+│   ├── CLI使用说明.md      # CLI多级命令使用说明
+│   ├── 数据库结构说明.md   # 数据库表结构详细说明
+│   └── 算子库使用说明.md   # 算子库使用说明
 ├── main.py                 # 主入口
 └── requirements.txt        # 依赖文件
 ```
@@ -222,13 +256,18 @@ aquant/
 | stock_info | 股票基本信息（代码、名称、行业、市值、交易所、产品类型等） |
 | index_constituent | 指数成分股数据（权重、市值、PE、PB等） |
 | qmt_instrument | QMT合约完整信息（名称、交易所、股本、涨跌停价等） |
+| trade_calendar | 交易日历（trade_date 主键） |
+| stock_pool | 股票池定义（pool_name 唯一、pool_code、description） |
+| stock_pool_member | 股票池成员（pool_id 外键、stock_code、added_date、removed_date） |
 | data_sync_log | 数据同步日志 |
 | execution_log | 执行日志（执行条件、参数、绩效指标） |
 | best_records | 最佳指标记录 |
 | portfolio_analysis | 组合分析结果 |
 | factor_exposure | 因子暴露数据 |
+| financial_data | 财务数据（资产负债表、利润表、现金流量表） |
 | valuation_result | 估值结果（各估值方法） |
 | valuation_summary | 估值综合结果 |
+| factor_registry | 因子注册表（因子元数据：名称、分类、来源、描述等） |
 
 ## 快速开始
 
@@ -287,7 +326,7 @@ python main.py
 # 方式2：使用命令行参数
 python main.py --source real
 
-# 方式3：使用QMT同步数据（账号密码从config/credentials.json读取）
+# 方式3：使用QMT同步数据（账号密码从config/config.json读取）
 python main.py --sync --start-date 20230101
 # 或通过命令行指定账号密码
 # python main.py --sync --account 你的账号 --password 你的密码 --start-date 20230101
@@ -311,6 +350,55 @@ python main.py --validate --start-date 20230101
 cd aquant
 streamlit run src/visualization/dashboard.py
 ```
+
+## CLI多级命令
+
+系统采用多级命令结构，支持交互式和命令式两种使用方式。
+
+### 一级命令列表
+
+| 命令 | 说明 | 交互式入口 |
+|------|------|-----------|
+| `config` | 配置管理（Token、数据源、日志级别） | `python main.py config` |
+| `data` | 数据管理（同步、校验、生成、概览） | `python main.py data` |
+| `factor` | 因子管理（查询、注册、测试） | `python main.py factor` |
+| `strategy` | 策略管理（列表、详情） | `python main.py strategy` |
+| `backtest` | 运行回测 | `python main.py backtest -s <策略>` |
+| `pool` | 股票池管理 | `python main.py pool` |
+| `result` | 回测结果管理 | `python main.py result` |
+
+### 常用命令示例
+
+```bash
+# 配置管理
+python main.py config --show                    # 查看当前配置
+python main.py config --token xxx               # 设置东财掘金Token
+python main.py config --data-source eastmoney   # 设置默认数据源
+
+# 数据管理
+python main.py data sync --source eastmoney     # 从东财掘金同步数据
+python main.py data validate                    # 校验数据完整性
+python main.py data status                      # 查看数据概览
+python main.py data generate-test               # 生成测试数据
+
+# 因子管理
+python main.py factor list                      # 列出所有因子
+python main.py factor list --category valuation # 按分类查看
+python main.py factor info --name pe_ratio      # 查看因子详情
+python main.py factor test --name pe_ratio      # 测试因子计算
+
+# 策略与回测
+python main.py strategy --list                  # 列出可用策略
+python main.py backtest -s BreakoutPullbackStrategy --pool CSI300  # 运行回测
+python main.py result --list                    # 查看回测结果
+
+# 股票池管理
+python main.py pool --list                      # 列出股票池
+python main.py pool --create tech --desc "科技股"  # 创建股票池
+python main.py pool --add tech --stocks 000001.SZ,600000.SH  # 添加股票
+```
+
+> **注意**：所有一级命令在不带子命令参数时，自动进入交互式菜单模式。
 
 ## 命令行参数
 
@@ -387,7 +475,7 @@ streamlit run src/visualization/dashboard.py
 
 ### 配置说明
 
-在 `config/credentials.json` 中配置QMT账号、密码和路径：
+在 `config/config.json` 中配置QMT账号、密码和路径：
 
 ```json
 {
@@ -694,6 +782,17 @@ report_path = generate_backtest_report(
 - **因子计算**: 自研算法
 
 ## 版本历史
+
+- **v0.7.0** (2025): 东财掘金数据源与CLI多级命令
+  - 新增东财掘金API数据源（eastmoney_connector、eastmoney_adapter）
+  - 新增代码转换器（symbol_converter）和股票信息提供者（stock_info_provider）
+  - 新增策略级因子服务（factor_service、factor_provider、factor_registry）
+  - 新增PB-ROE月度调仓策略（pb_roe_monthly）
+  - CLI重构为多级命令结构（config/data/factor/strategy/backtest/pool/result）
+  - 新增交互式菜单框架（interactive），所有命令支持交互式和命令式两种用法
+  - 新增股票池管理（stock_pool、stock_pool_member表）
+  - 新增交易日历表（trade_calendar）和因子注册表（factor_registry）
+  - 通用回测引擎（backtest_engine）支持多数据源、市场过滤、风控
 
 - **v0.6.0** (2025): 多因子回测引擎V2重构
   - 扩充因子池：8类因子（动量/均值回复/波动率/成交量/相关性/质量/趋势/形态），来自 alpha101/alpha191

@@ -64,7 +64,7 @@ class Position:
     entry_price: float
     entry_date: pd.Timestamp
     entry_reason: str = ""
-    highest_price: float = 0.0  # 持仓期间最高价（用于ATR跟踪止盈）
+    highest_price: float = 0.0  # 持仓期间最高价（用于ATR动态止盈）
     # 扩展字段（策略可自定义）
     metadata: Dict[str, Any] = field(default_factory=dict)
 

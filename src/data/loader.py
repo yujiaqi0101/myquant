@@ -7,6 +7,10 @@
 - test: 使用 data/test_data/ 目录下的CSV测试数据
 - real: 使用数据库中的真实数据
 - auto: 自动检测（默认）
+
+支持通过环境变量 AQUANT_DATA_SOURCE 配置数据来源：
+- database: 本地 SQLite 数据库（默认）
+- eastmoney: 东财掘金 API
 """
 
 from typing import Union, List, Optional
@@ -18,12 +22,36 @@ import os
 from .adapter import DailyDataAdapter, MockDataAdapter
 from .db_adapter import DatabaseAdapter
 
-try:
-    from .qmt_connector import QMTConnector
-    from .data_sync import DataSynchronizer
-    _QMT_AVAILABLE = True
-except ImportError:
-    _QMT_AVAILABLE = False
+# QMT 和东财掘金采用延迟导入，避免在不需要时加载 xtquant/gm
+_QMT_AVAILABLE = None  # None=未检测, True/False=已检测
+_EASTMONEY_AVAILABLE = None
+
+
+def _check_qmt_available():
+    """延迟检测 QMT 是否可用"""
+    global _QMT_AVAILABLE
+    if _QMT_AVAILABLE is not None:
+        return _QMT_AVAILABLE
+    try:
+        from .qmt_connector import QMTConnector
+        from .data_sync import DataSynchronizer
+        _QMT_AVAILABLE = True
+    except ImportError:
+        _QMT_AVAILABLE = False
+    return _QMT_AVAILABLE
+
+
+def _check_eastmoney_available():
+    """延迟检测东财掘金是否可用"""
+    global _EASTMONEY_AVAILABLE
+    if _EASTMONEY_AVAILABLE is not None:
+        return _EASTMONEY_AVAILABLE
+    try:
+        from .eastmoney_adapter import EastmoneyAdapter
+        _EASTMONEY_AVAILABLE = True
+    except ImportError:
+        _EASTMONEY_AVAILABLE = False
+    return _EASTMONEY_AVAILABLE
 
 
 class DataLoader:
@@ -243,18 +271,20 @@ class DataLoader:
         DataLoader
             数据加载器实例
         """
-        if not _QMT_AVAILABLE:
+        if not _check_qmt_available():
             raise ImportError(
                 "QMT模块不可用。请确保已安装xtquant库，"
                 "并且国金QMT交易端已以极简模式启动。"
             )
 
+        from .qmt_connector import QMTConnector
+        from .data_sync import DataSynchronizer
         from ..data.database import DatabaseManager
         from config.config import get_credentials
 
         db = DatabaseManager(db_path)
 
-        # 账号密码：参数优先，为空时从credentials.json读取
+        # 账号密码：参数优先，为空时从config.json读取
         if not account or not password:
             creds = get_credentials('qmt')
             account = account or creds.get('account', '')
@@ -274,6 +304,62 @@ class DataLoader:
                 print(f"数据同步完成: {result}")
 
         return cls.from_database(db_path)
+
+    @classmethod
+    def from_eastmoney(
+        cls,
+        token: str = None,
+        start_date: str = None,
+        end_date: str = None,
+        stock_codes: List[str] = None,
+        adjust: int = 1,
+    ) -> 'DataLoader':
+        """
+        从东财掘金 API 创建数据加载器
+
+        Parameters
+        ----------
+        token : str, optional
+            API token，不提供则从 config.json 读取
+        start_date : str
+            数据起始日期，格式 'YYYY-MM-DD'
+        end_date : str
+            数据结束日期，格式 'YYYY-MM-DD'
+        stock_codes : List[str], optional
+            股票代码列表（系统内部格式 600000.SH）
+        adjust : int
+            复权方式：0=不复权, 1=前复权, 2=后复权
+
+        Returns
+        -------
+        DataLoader
+            数据加载器实例
+        """
+        if not _check_eastmoney_available():
+            raise ImportError(
+                "东财掘金模块不可用。请确保已安装 gm 库。"
+            )
+
+        from config.config import get_credentials
+        from .eastmoney_adapter import EastmoneyAdapter
+
+        if not token:
+            creds = get_credentials('eastmoney')
+            token = creds.get('token', '')
+
+        if not token:
+            raise ValueError("东财掘金 token 未配置。请在 config.json 的 credentials.eastmoney.token 中设置")
+
+        adapter = EastmoneyAdapter(token=token, adjust=adjust)
+
+        # 加载价格数据
+        if start_date and end_date:
+            adapter.load_price_data(start_date=start_date, end_date=end_date, stock_codes=stock_codes)
+
+        # 加载股票列表
+        adapter.load_stock_list()
+
+        return cls(adapter)
 
     @classmethod
     def create(cls, db_path: Optional[str] = None) -> 'DataLoader':

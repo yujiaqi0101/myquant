@@ -18,13 +18,12 @@ class BaseStrategy(ABC):
     用户只需实现 on_init 和 on_bar 两个方法即可运行回测。
     
     支持的可配置参数（通过CLI或构造函数传入）：
-    - stop_loss: float = 0.07           # 止损比例
-    - take_profit: float = 0.20         # 止盈比例  
-    - trailing_stop: int = 3            # 动态止盈均线窗口
-    - max_holding_days: int = 20        # 最大持仓天数
     - position_size: float = 0.10       # 单次开仓资金比例
+    - max_positions: int = 30           # 最大持仓数量
     - commission_rate: float = 0.0003   # 佣金费率
     - slippage: float = 0.0001          # 滑点
+    
+    止盈止损由策略通过 exit_checker 方法自行实现，基类不提供默认值。
     
     框架保证调用顺序：on_init -> [on_bar 循环] -> on_stop
     """
@@ -37,14 +36,11 @@ class BaseStrategy(ABC):
     
     # 默认参数（子类覆盖）
     default_params: Dict[str, Any] = {
-        'stop_loss': 0.07,
-        'take_profit': 0.20,
-        'trailing_stop': 3,
-        'max_holding_days': 20,
         'position_size': 0.10,
         'max_positions': 30,  # 最大持仓数量
         'commission_rate': 0.0003,
         'slippage': 0.0001,
+        # 注：止损止盈参数由策略自行定义，基类不再提供默认值
     }
 
     def __init__(self, **kwargs):
@@ -90,11 +86,8 @@ class BaseStrategy(ABC):
     def _get_param_description(cls, name: str) -> str:
         """获取参数描述"""
         descriptions = {
-            'stop_loss': '止损比例，如0.07表示亏损7%止损',
-            'take_profit': '止盈比例，如0.20表示盈利20%止盈',
-            'trailing_stop': '动态止盈均线窗口，如3表示跌破3日均线止盈',
-            'max_holding_days': '最大持仓天数，超时强制平仓',
             'position_size': '单次开仓资金比例，如0.10表示使用10%资金',
+            'max_positions': '最大持仓股票数量',
             'commission_rate': '佣金费率，如0.0003表示万三',
             'slippage': '滑点比例，如0.0001表示万分之一',
         }
@@ -156,28 +149,53 @@ class BaseStrategy(ABC):
     def on_order_rejected(self, context: 'Context', order: 'Order', reason: str):
         """订单被拒绝回调（如资金不足）"""
         pass
-    
-    def on_exit_triggered(self, context: 'Context', position: 'Position', reason: str) -> Optional['Order']:
+
+    def exit_checker(self, context: 'Context', position: 'Position') -> Optional['ExitCheckResult']:
         """
-        出场触发回调（当引擎级出场规则触发时）
-        
-        策略可在此回调中决定是否接受引擎的出场建议，
-        或返回一个新的出场订单。
-        
+        出场检查 - 策略层自定义止盈止损逻辑
+
+        策略可重写此方法实现自定义出场条件（止损、止盈、动态止盈等）。
+        返回 ExitCheckResult 表示触发出场，返回 None 表示不触发出场。
+
+        默认实现：无止盈止损（返回 None）
+
+        使用示例：
+            # 方式1：使用 ExitChecker 工具类
+            def exit_checker(self, context, position):
+                from src.engine.exit_checker import ExitChecker
+                checker = ExitChecker({'stop_loss': 0.07, 'take_profit': 0.20})
+                return checker.check_all(context, position)
+
+            # 方式2：完全自定义
+            def exit_checker(self, context, position):
+                price = context.market_data[position.stock_code]['close']
+                pnl = (price - position.entry_price) / position.entry_price
+                if pnl < -0.10:
+                    return ExitCheckResult(should_exit=True, reason=f"止损：亏损 {pnl:.2%}")
+                return None
+
         Parameters
         ----------
         context : Context
+            策略上下文
         position : Position
-            触发出场的持仓
-        reason : str
-            出场原因（如"止损：亏损 -7.00%"）
-            
+            当前持仓
+
         Returns
         -------
-        Optional[Order]
-            返回出场订单则执行，返回 None 则忽略此次出场
+        Optional[ExitCheckResult]
+            出场检查结果，None 表示不触发
         """
-        return None  # 默认接受引擎建议
+        return None
+
+    def on_exit_triggered(self, context: 'Context', position: 'Position', reason: str) -> Optional['Order']:
+        """
+        [已废弃] 出场触发回调
+
+        请使用 exit_checker 方法替代。
+        保留此方法用于向后兼容，默认返回 None（忽略引擎建议）。
+        """
+        return None
 
 
 # ---- 策略注册表 ----
@@ -217,21 +235,105 @@ class StrategyRegistry:
     
     @classmethod
     def auto_discover(cls, package_path: str = 'src.strategies'):
-        """自动发现策略目录下的所有策略"""
+        """
+        自动发现策略目录下的所有策略
+
+        支持两种目录结构：
+        1. 旧版（平铺）：src/strategies/<策略名>.py
+        2. 新版（ID目录）：src/strategies/<策略ID>/<策略名>_<版本>.py
+
+        版本控制：查询数据库 strategy_versions 表，
+        仅加载 is_active=1 的版本文件。
+        如果数据库不存在或表中无记录，则加载每个策略的最新版本文件。
+        """
         import importlib
+        import importlib.util
         import pkgutil
-        
+        from pathlib import Path
+
+        # 尝试从数据库获取活跃版本映射
+        active_versions = cls._load_active_versions()
+
         try:
             package = importlib.import_module(package_path)
+            package_dir = Path(package.__path__[0])
+
+            # ---- 新版: 扫描ID目录下的策略文件 ----
+            for item in package_dir.iterdir():
+                if not item.is_dir() or item.name.startswith('_'):
+                    continue
+                if item.name.startswith('__'):
+                    continue
+
+                # 查找版本化策略文件 (*_v*.py)
+                all_versions = sorted(item.glob('*_v*.py'))
+                if not all_versions:
+                    continue
+
+                # 从文件名提取策略名（取第一个文件的格式）
+                stem = all_versions[0].stem  # e.g., "small_cap_v1"
+                if '_v' in stem:
+                    strategy_name = stem.rsplit('_v', 1)[0]
+                else:
+                    strategy_name = stem
+
+                # 决定要加载哪个版本
+                target_file = None
+                if active_versions:
+                    # 数据库中有活跃版本记录：精确匹配版本号
+                    target_version = active_versions.get(strategy_name)
+                    if target_version:
+                        target_pattern = f"{strategy_name}_{target_version}.py"
+                        for py_file in all_versions:
+                            if py_file.name == target_pattern:
+                                target_file = py_file
+                                break
+                        if target_file is None:
+                            print(f"策略 {strategy_name} 活跃版本 {target_version} 的文件不存在，跳过")
+
+                if target_file is None and not active_versions:
+                    # 无数据库记录：加载最新版本（文件名排序最后）
+                    target_file = all_versions[-1]
+
+                if target_file is None:
+                    continue
+
+                # 加载选定的策略文件
+                module_name = target_file.stem
+                spec = importlib.util.spec_from_file_location(
+                    f"{package_path}.{item.name}.{module_name}",
+                    str(target_file),
+                )
+                if spec and spec.loader:
+                    try:
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                    except Exception as e:
+                        print(f"加载策略模块 {item.name}/{module_name} 失败: {e}")
+
+            # ---- 旧版兼容: 平铺策略文件 ----
             for _, name, is_pkg in pkgutil.iter_modules(package.__path__):
                 if not is_pkg and not name.startswith('_'):
                     try:
-                        module = importlib.import_module(f"{package_path}.{name}")
-                        # 模块导入时会自动执行 @StrategyRegistry.register 装饰器
+                        importlib.import_module(f"{package_path}.{name}")
                     except Exception as e:
                         print(f"加载策略模块 {name} 失败: {e}")
         except ImportError as e:
             print(f"导入策略包 {package_path} 失败: {e}")
+
+    @classmethod
+    def _load_active_versions(cls) -> dict:
+        """从数据库加载活跃策略版本映射 {strategy_name: version}"""
+        try:
+            from src.data.database import DatabaseManager
+            from config.config import DATABASE_CONFIG
+            db = DatabaseManager(DATABASE_CONFIG.get('path', 'data/aquant.db'))
+            active = db.get_active_strategies()
+            if active is not None and not active.empty:
+                return dict(zip(active['strategy_name'], active['version']))
+        except Exception:
+            pass
+        return {}
 
 
 # 装饰器语法糖

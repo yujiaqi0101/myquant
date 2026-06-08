@@ -7,6 +7,10 @@
 因子分类体系：
 - 技术指标类：K线形态、成交量异常、VWAP偏离、动量类、均值回复、波动率类、相关性类、情绪类、突破类
 - 基本面类：估值因子、盈利因子、成长因子、质量因子
+
+新增：策略级因子服务（FactorService）
+- 统一因子获取接口，支持多数据源切换
+- 按日获取因子值，适合策略内调用
 """
 
 from .calculator import FactorCalculator
@@ -30,6 +34,22 @@ from .categories import (
     get_factors_by_category,
     get_category_factors_dict,
     print_factor_categories,
+)
+
+# 新增：策略级因子服务
+from .factor_service import FactorService
+from .factor_registry import (
+    register_factor,
+    get_factor_info,
+    list_factors,
+    is_factor_supported,
+    FactorCategory as FR_FactorCategory,
+    FactorSource,
+)
+from .factor_provider import (
+    FactorProvider,
+    EastmoneyFactorProvider,
+    DatabaseFactorProvider,
 )
 
 __all__ = [
@@ -58,4 +78,13 @@ __all__ = [
     "get_factors_by_category",
     "get_category_factors_dict",
     "print_factor_categories",
+    # 新增：策略级因子服务
+    "FactorService",
+    "register_factor",
+    "get_factor_info",
+    "list_factors",
+    "is_factor_supported",
+    "FactorProvider",
+    "EastmoneyFactorProvider",
+    "DatabaseFactorProvider",
 ]

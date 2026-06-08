@@ -16,17 +16,13 @@ env/
 *.swo
 *~
 
-# 运行时生成的数据文件
-data/
-!data/.gitkeep
-data/raw/
-data/processed/
-data/external/
-data/test_*.db
+# 运行时生成的数据文件 - 只排除数据库文件，保留目录结构和CSV等数据
 *.db
-
-# 测试数据（可通过 python main.py --generate-test-data 重新生成）
-data/test_data/*.csv
+*.db-shm
+*.db-wal
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
 
 # 报告输出（运行时生成）
 reports/
@@ -43,8 +39,8 @@ Thumbs.db
 .env
 .env.local
 
-# 凭证配置（包含账号密码等敏感信息）
-config/credentials.json
+# 统一配置文件（包含账号密码等敏感信息）
+config/config.json
 
 # Python构建产物
 *.egg-info/
@@ -84,3 +80,4 @@ src/strategies/user_*.py
 
 # IDE/工具
 .trae/
+.claude/
