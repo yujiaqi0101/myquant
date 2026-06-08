@@ -15,29 +15,12 @@ from typing import Optional
 from .interactive import InteractiveMenu, prompt_input
 
 
-# 配置文件路径
-CREDENTIALS_PATH = Path(__file__).parent.parent.parent / 'config' / 'credentials.json'
+# 统一配置文件路径
 CONFIG_PATH = Path(__file__).parent.parent.parent / 'config' / 'config.json'
 
 
-def _load_credentials() -> dict:
-    """加载凭证文件"""
-    if CREDENTIALS_PATH.exists():
-        with open(CREDENTIALS_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-
-def _save_credentials(data: dict) -> None:
-    """保存凭证文件"""
-    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CREDENTIALS_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    print(f"✓ 配置已保存到 {CREDENTIALS_PATH}")
-
-
 def _load_config() -> dict:
-    """加载配置文件"""
+    """加载统一配置文件"""
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -45,35 +28,31 @@ def _load_config() -> dict:
 
 
 def _save_config(data: dict) -> None:
-    """保存配置文件"""
+    """保存统一配置文件"""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    print(f"✓ 配置已保存到 {CONFIG_PATH}")
+    print(f"配置已保存到 {CONFIG_PATH}")
 
 
 # ---- 命令式操作 ----
 
 def set_eastmoney_token(token: str) -> None:
     """设置东财掘金 Token"""
-    creds = _load_credentials()
-    if 'eastmoney' not in creds:
-        creds['eastmoney'] = {}
-    creds['eastmoney']['token'] = token
-    _save_credentials(creds)
-    print(f"✓ 东财掘金 Token 已设置")
+    config = _load_config()
+    config.setdefault("credentials", {}).setdefault("eastmoney", {})["token"] = token
+    _save_config(config)
+    print(f"东财掘金 Token 已设置")
 
 
 def set_qmt_account(account: str, password: str = None) -> None:
     """设置 QMT 账号"""
-    creds = _load_credentials()
-    if 'qmt' not in creds:
-        creds['qmt'] = {}
-    creds['qmt']['account'] = account
+    config = _load_config()
+    config.setdefault("credentials", {}).setdefault("qmt", {})["account"] = account
     if password:
-        creds['qmt']['password'] = password
-    _save_credentials(creds)
-    print(f"✓ QMT 账号已设置")
+        config["credentials"]["qmt"]["password"] = password
+    _save_config(config)
+    print(f"QMT 账号已设置")
 
 
 def set_data_source(source: str) -> None:
@@ -103,7 +82,8 @@ def show_config() -> None:
     print(f"{'=' * 50}")
 
     # 凭证信息
-    creds = _load_credentials()
+    config = _load_config()
+    creds = config.get("credentials", {})
     if 'eastmoney' in creds:
         token = creds['eastmoney'].get('token', '')
         masked = token[:8] + '...' + token[-4:] if len(token) > 12 else '***'
@@ -124,8 +104,7 @@ def show_config() -> None:
     if 'logging' in config:
         print(f"  日志级别: {config['logging'].get('level', '未设置')}")
 
-    print(f"\n  凭证文件: {CREDENTIALS_PATH}")
-    print(f"  配置文件: {CONFIG_PATH}")
+    print(f"\n  配置文件: {CONFIG_PATH}")
     print(f"{'=' * 50}")
 
 
@@ -137,8 +116,8 @@ def _interactive_show_config():
 
 def _interactive_set_token():
     print("\n--- 配置东财掘金 Token ---")
-    creds = _load_credentials()
-    current = creds.get('eastmoney', {}).get('token', '')
+    config = _load_config()
+    current = config.get("credentials", {}).get("eastmoney", {}).get("token", "")
     if current:
         masked = current[:8] + '...' + current[-4:] if len(current) > 12 else '***'
         print(f"  当前 Token: {masked}")
@@ -150,8 +129,8 @@ def _interactive_set_token():
 
 def _interactive_set_qmt():
     print("\n--- 配置 QMT 账号 ---")
-    creds = _load_credentials()
-    current_account = creds.get('qmt', {}).get('account', '')
+    config = _load_config()
+    current_account = config.get("credentials", {}).get("qmt", {}).get("account", "")
     account = prompt_input("QMT 账号", current_account if current_account else None)
     password = prompt_input("QMT 密码")
     if account:

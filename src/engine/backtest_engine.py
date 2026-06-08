@@ -219,10 +219,11 @@ class BacktestEngine:
                     if result.suggested_order:
                         exit_orders.append(result.suggested_order)
                     else:
-                        # 自动生成出场订单
+                        # 自动生成出场订单（方向与持仓相反 = 平仓）
+                        exit_direction = Direction.SHORT if position.direction == Direction.LONG else Direction.LONG
                         exit_orders.append(Order(
                             stock_code=stock_code,
-                            direction=position.direction,
+                            direction=exit_direction,
                             quantity=position.quantity,
                             reason=result.reason
                         ))

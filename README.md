@@ -155,7 +155,7 @@
 aquant/
 ├── config/                 # 配置文件
 │   ├── config.py          # 主配置文件
-│   └── credentials.json   # 敏感信息（账号密码等）
+│   └── config.json        # 统一配置（数据源、账号密码等）
 ├── data/                   # 数据目录
 │   ├── aquant.db          # SQLite数据库（存储真实数据）
 │   └── test_data/         # 测试数据目录（CSV文件）
@@ -326,7 +326,7 @@ python main.py
 # 方式2：使用命令行参数
 python main.py --source real
 
-# 方式3：使用QMT同步数据（账号密码从config/credentials.json读取）
+# 方式3：使用QMT同步数据（账号密码从config/config.json读取）
 python main.py --sync --start-date 20230101
 # 或通过命令行指定账号密码
 # python main.py --sync --account 你的账号 --password 你的密码 --start-date 20230101
@@ -475,7 +475,7 @@ python main.py pool --add tech --stocks 000001.SZ,600000.SH  # 添加股票
 
 ### 配置说明
 
-在 `config/credentials.json` 中配置QMT账号、密码和路径：
+在 `config/config.json` 中配置QMT账号、密码和路径：
 
 ```json
 {

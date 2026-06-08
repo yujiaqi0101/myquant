@@ -143,9 +143,13 @@ class SmallCapStrategy(BaseStrategy):
         self._surge_peaks: Dict[str, float] = {}  # {symbol: peak_price}
         self._surge_mode: Set[str] = set()        # 异动监控中的股票
         self._surge_sold_history: Dict[str, str] = {}  # 本月已止盈卖出
+        self._surge_total_count: int = 0               # 累计异动止盈次数(不清零)
 
         # 预加载指数数据
         self._preload_index_data(context)
+
+        # 预热价格缓冲区（从warmup数据填充，避免首月波动率过滤失效）
+        self._warmup_price_buffer(context)
 
         logger.info(
             "SmallCapStrategy 初始化完成 | 交易日历%d天 | "
@@ -168,6 +172,23 @@ class SmallCapStrategy(BaseStrategy):
             idx_data = full_data.xs(index_code, level='stock_code')
             self._index_prices = idx_data['close'].astype(float).tolist()
             logger.info(f"  预加载 {index_code} 指数数据: {len(self._index_prices)} 天")
+
+    def _warmup_price_buffer(self, context: Context):
+        """从full_data预热价格缓冲区，避免首月波动率/动量过滤无历史数据"""
+        full_data = context.full_data
+        if full_data is None or full_data.empty:
+            return
+
+        maxlen = self._price_buffer_maxlen
+        # 按股票分组取最近N个收盘价
+        grouped = full_data.groupby(level='stock_code')['close']
+        count = 0
+        for code, series in grouped:
+            prices = series.astype(float).dropna().tolist()
+            if len(prices) >= 5:  # 至少需要一些数据
+                self._price_buffer[code] = prices[-maxlen:]
+                count += 1
+        logger.info(f"  预热价格缓冲区: {count} 只股票")
 
     # ================================================================
     # 每日调用
@@ -408,16 +429,11 @@ class SmallCapStrategy(BaseStrategy):
             if len(prices) < 20:
                 continue
 
-            closes = np.array(prices[-21:])  # 取21天, 计算20个日收益率
-            if len(closes) < 11:  # 至少需要一定数据
-                continue
-
+            closes = np.array(prices[-21:])  # p[-21:]=最近21天, 计算20个日收益率
+            # len(prices) >= 20 已在上方保证, closes 至少有20个元素
             returns = np.diff(closes) / closes[:-1]
-            if len(returns) < 5:
-                continue
-
-            volatility = np.std(returns[-20:]) if len(returns) >= 20 else np.std(returns)
-            ret_20d = (closes[-1] / closes[-min(21, len(closes))] - 1)
+            volatility = np.std(returns[-20:])
+            ret_20d = (closes[-1] / closes[-20] - 1) if len(closes) >= 20 else (closes[-1] / closes[0] - 1)
 
             if volatility <= max_vol and ret_20d >= min_ret:
                 qualified.append(code)
@@ -429,27 +445,30 @@ class SmallCapStrategy(BaseStrategy):
     # ================================================================
 
     def _get_industry_map(self, codes: List[str], date: str) -> Dict[str, str]:
-        """获取股票的行业分类"""
+        """获取股票的行业分类（带缓存）"""
+        # 懒加载行业映射缓存
+        if not hasattr(self, '_industry_cache'):
+            self._industry_cache: Dict[str, str] = {}
+            try:
+                from src.data.database import DatabaseManager
+                from config.config import DATABASE_CONFIG
+                db = DatabaseManager(DATABASE_CONFIG.get('path', 'data/aquant.db'))
+                df = db.get_stock_info()
+                if df is not None and not df.empty and 'industry' in df.columns:
+                    for _, row in df.iterrows():
+                        code = row.get('stock_code', '')
+                        industry = row.get('industry', '')
+                        if code and industry:
+                            self._industry_cache[code] = str(industry)
+            except Exception:
+                pass
+
+        # 从缓存构建结果，降级为板块前缀
         industry_map = {}
-
-        # 方案1: 从stock_info表获取
-        try:
-            from src.data.database import DatabaseManager
-            from config.config import DATABASE_CONFIG
-            db = DatabaseManager(DATABASE_CONFIG.get('path', 'data/aquant.db'))
-            df = db.get_stock_info()
-            if df is not None and not df.empty and 'industry' in df.columns:
-                for _, row in df.iterrows():
-                    code = row.get('stock_code', '')
-                    industry = row.get('industry', '')
-                    if code in set(codes) and industry:
-                        industry_map[code] = str(industry)
-        except Exception:
-            pass
-
-        # 方案2: 降级为使用板块前缀作为行业代理
         for code in codes:
-            if code not in industry_map:
+            if code in self._industry_cache:
+                industry_map[code] = self._industry_cache[code]
+            else:
                 prefix = code.split('.')[0][:2]
                 industry_map[code] = f"board_{prefix}"
 
@@ -786,6 +805,7 @@ class SmallCapStrategy(BaseStrategy):
                     ))
                     surge_sold_today.add(code)
                     self._surge_sold_history[code] = date
+                    self._surge_total_count += 1  # 累计计数，不清零
                     logger.info(
                         "  [移动止盈] %s 峰值%.2f 回落%.1f%% → 止盈卖出",
                         code, peak, abs(drawdown_from_peak) * 100,
@@ -819,5 +839,4 @@ class SmallCapStrategy(BaseStrategy):
 
     def on_stop(self, context: Context):
         """回测结束"""
-        surge_count = len(self._surge_sold_history)
-        logger.info("回测结束 | 异动止盈触发: %d次", surge_count)
+        logger.info("回测结束 | 异动止盈触发: %d次", self._surge_total_count)

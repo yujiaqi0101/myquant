@@ -660,8 +660,8 @@ def main():
     parser.add_argument('--generate-test-data', action='store_true', help='仅生成测试数据CSV文件')
     parser.add_argument('--start-date', default='20230101', help='数据起始日期 (YYYYMMDD)')
     parser.add_argument('--end-date', default='', help='数据结束日期 (YYYYMMDD)')
-    parser.add_argument('--account', default='', help='QMT交易账号（默认从config/credentials.json读取）')
-    parser.add_argument('--password', default='', help='QMT交易密码（默认从config/credentials.json读取）')
+    parser.add_argument('--account', default='', help='QMT交易账号（默认从config/config.json读取）')
+    parser.add_argument('--password', default='', help='QMT交易密码（默认从config/config.json读取）')
     parser.add_argument('--n-stocks', type=int, default=100, help='测试数据股票数量')
     parser.add_argument('--n-days', type=int, default=250, help='测试数据天数')
     parser.add_argument('--log-level', default='INFO',
@@ -880,7 +880,7 @@ def main():
             print("\n   ✗ 数据库为空，真实模式下无法运行!")
             print("   请选择以下方式之一：")
             print("   1. 切换到测试模式: python main.py --source test")
-            print("   2. 同步QMT数据:  python main.py --sync  (账号密码从config/credentials.json读取)")
+            print("   2. 同步QMT数据:  python main.py --sync  (账号密码从config/config.json读取)")
             print("      或命令行指定:    python main.py --sync --account 你的账号 --password 你的密码")
             print("   3. 生成模拟数据CSV: python main.py --generate-test-data")
             return

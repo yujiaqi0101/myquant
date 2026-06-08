@@ -284,7 +284,7 @@ class DataLoader:
 
         db = DatabaseManager(db_path)
 
-        # 账号密码：参数优先，为空时从credentials.json读取
+        # 账号密码：参数优先，为空时从config.json读取
         if not account or not password:
             creds = get_credentials('qmt')
             account = account or creds.get('account', '')
@@ -320,7 +320,7 @@ class DataLoader:
         Parameters
         ----------
         token : str, optional
-            API token，不提供则从 credentials.json 读取
+            API token，不提供则从 config.json 读取
         start_date : str
             数据起始日期，格式 'YYYY-MM-DD'
         end_date : str
@@ -348,7 +348,7 @@ class DataLoader:
             token = creds.get('token', '')
 
         if not token:
-            raise ValueError("东财掘金 token 未配置。请在 credentials.json 中设置 eastmoney.token")
+            raise ValueError("东财掘金 token 未配置。请在 config.json 的 credentials.eastmoney.token 中设置")
 
         adapter = EastmoneyAdapter(token=token, adjust=adjust)
 

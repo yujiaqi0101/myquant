@@ -241,12 +241,18 @@ class StrategyRegistry:
         支持两种目录结构：
         1. 旧版（平铺）：src/strategies/<策略名>.py
         2. 新版（ID目录）：src/strategies/<策略ID>/<策略名>_<版本>.py
+
+        版本控制：查询数据库 strategy_versions 表，
+        仅加载 is_active=1 的版本文件。
+        如果数据库不存在或表中无记录，则加载每个策略的最新版本文件。
         """
         import importlib
         import importlib.util
         import pkgutil
-        import os
         from pathlib import Path
+
+        # 尝试从数据库获取活跃版本映射
+        active_versions = cls._load_active_versions()
 
         try:
             package = importlib.import_module(package_path)
@@ -260,18 +266,50 @@ class StrategyRegistry:
                     continue
 
                 # 查找版本化策略文件 (*_v*.py)
-                for py_file in sorted(item.glob('*_v*.py')):
-                    module_name = py_file.stem
-                    spec = importlib.util.spec_from_file_location(
-                        f"{package_path}.{item.name}.{module_name}",
-                        str(py_file),
-                    )
-                    if spec and spec.loader:
-                        try:
-                            module = importlib.util.module_from_spec(spec)
-                            spec.loader.exec_module(module)
-                        except Exception as e:
-                            print(f"加载策略模块 {item.name}/{module_name} 失败: {e}")
+                all_versions = sorted(item.glob('*_v*.py'))
+                if not all_versions:
+                    continue
+
+                # 从文件名提取策略名（取第一个文件的格式）
+                stem = all_versions[0].stem  # e.g., "small_cap_v1"
+                if '_v' in stem:
+                    strategy_name = stem.rsplit('_v', 1)[0]
+                else:
+                    strategy_name = stem
+
+                # 决定要加载哪个版本
+                target_file = None
+                if active_versions:
+                    # 数据库中有活跃版本记录：精确匹配版本号
+                    target_version = active_versions.get(strategy_name)
+                    if target_version:
+                        target_pattern = f"{strategy_name}_{target_version}.py"
+                        for py_file in all_versions:
+                            if py_file.name == target_pattern:
+                                target_file = py_file
+                                break
+                        if target_file is None:
+                            print(f"策略 {strategy_name} 活跃版本 {target_version} 的文件不存在，跳过")
+
+                if target_file is None and not active_versions:
+                    # 无数据库记录：加载最新版本（文件名排序最后）
+                    target_file = all_versions[-1]
+
+                if target_file is None:
+                    continue
+
+                # 加载选定的策略文件
+                module_name = target_file.stem
+                spec = importlib.util.spec_from_file_location(
+                    f"{package_path}.{item.name}.{module_name}",
+                    str(target_file),
+                )
+                if spec and spec.loader:
+                    try:
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                    except Exception as e:
+                        print(f"加载策略模块 {item.name}/{module_name} 失败: {e}")
 
             # ---- 旧版兼容: 平铺策略文件 ----
             for _, name, is_pkg in pkgutil.iter_modules(package.__path__):
@@ -282,6 +320,20 @@ class StrategyRegistry:
                         print(f"加载策略模块 {name} 失败: {e}")
         except ImportError as e:
             print(f"导入策略包 {package_path} 失败: {e}")
+
+    @classmethod
+    def _load_active_versions(cls) -> dict:
+        """从数据库加载活跃策略版本映射 {strategy_name: version}"""
+        try:
+            from src.data.database import DatabaseManager
+            from config.config import DATABASE_CONFIG
+            db = DatabaseManager(DATABASE_CONFIG.get('path', 'data/aquant.db'))
+            active = db.get_active_strategies()
+            if active is not None and not active.empty:
+                return dict(zip(active['strategy_name'], active['version']))
+        except Exception:
+            pass
+        return {}
 
 
 # 装饰器语法糖

@@ -1,0 +1,15 @@
+{
+  "data_source": {
+    "source": "database"
+  },
+  "credentials": {
+    "qmt": {
+      "account": "your_account",
+      "password": "your_password",
+      "path": "E:\\国金QMT交易端模拟\\userdata_mini"
+    },
+    "eastmoney": {
+      "token": "your_token"
+    }
+  }
+}

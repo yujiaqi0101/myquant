@@ -84,7 +84,7 @@ python main.py config --show --data-source eastmoney --log-level INFO
 
 配置信息存储在以下文件中：
 
-- 凭证文件：`config/credentials.json`（Token、账号、密码）
+- 统一配置文件：`config/config.json`（数据源、Token、账号、密码）
 - 配置文件：`config/config.json`（数据源、日志级别等）
 
 ---
