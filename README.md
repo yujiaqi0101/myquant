@@ -34,12 +34,13 @@
 - 因子回测框架
 - 策略绩效评估
 - 交易成本模拟
-- **HTML报告生成**：使用 ECharts 生成交互式报告
-  - 净值曲线（可缩放、悬停查看）
-  - 回撤曲线
-  - 绩效指标汇总表
-  - 交易记录明细
-  - 交易统计
+- **HTML报告生成**：使用 Chart.js 生成交互式报告
+  - 绩效摘要卡片（累计收益、年化收益、夏普比率、最大回撤、胜率、交易次数）
+  - 净值曲线（可缩放、悬停查看，含回撤区域标注）
+  - K线图（含买卖点标记）
+  - 交易记录明细（日期、股票、方向、价格、数量、盈亏）
+  - 个股明细（按股票汇总交易统计、胜率、盈亏，点击展开交易明细）
+  - 每日账户快照（现金、持仓市值、总市值、持仓数，点击行查看当日持仓）
 
 ### 🧪 多因子回测引擎
 - **V2引擎（推荐）**：多因子分层回测
@@ -105,7 +106,7 @@
 - 代码转换器（东财代码 <-> 标准代码）
 - 股票信息提供者（统一接口适配多数据源）
 
-### 🧩 策略级因子服务
+### 🧩 因子服务
 - **因子注册表**：统一管理因子元数据（名称、分类、数据源、API字段）
 - **因子服务**：策略级因子查询，支持按日期获取全市场因子值
 - **因子提供者**：对接东财掘金API，提供估值/财务类因子数据
@@ -143,11 +144,18 @@
 - **日志级别**：支持 DEBUG/INFO/WARNING/ERROR 四级
 - **命令行控制**：`--log-level` 设置级别，`--no-log-file` 仅控制台输出
 
-### 🔀 测试数据与真实数据分离
-- **测试数据**：存储在 `data/test_data/` 目录的CSV文件中，不写入数据库
-- **真实数据**：存储在SQLite数据库中，通过QMT同步或手动导入
-- **环境变量切换**：通过 `AQUANT_DATA_MODE` 环境变量选择数据源
-- **清晰区分**：运行时会明确显示当前使用的数据源，避免混淆
+### 🔀 数据模式与数据源分离
+
+**数据行为模式**（`AQUANT_DATA_MODE` 环境变量）：
+- **test**（默认）：优先从数据库读取，数据库为空时回退到CSV模拟数据。模拟数据不写入数据库。
+- **real**：仅从数据库读取，数据库为空则报错退出。
+
+**数据来源**（通过 `config/config.json` → `data_source.source` 配置）：
+- **database**：本地 SQLite 数据库
+- **eastmoney**：东财掘金 API（实时获取行情和因子数据）
+- 优先级：命令行 `--data-source` > `config.json` > 默认值 database
+
+运行时控制台会明确显示当前模式和来源，避免混淆。
 
 ## 项目结构
 
@@ -279,9 +287,9 @@ pip install -r requirements.txt
 
 > **注意**：`xtquant` 需要安装国金QMT交易端后才能使用。如果不需要QMT数据源，可以跳过xtquant安装。
 
-### 2. 环境变量配置
+### 2. 配置数据源
 
-系统通过 `AQUANT_DATA_MODE` 环境变量控制运行时数据行为：
+**数据行为模式**（`AQUANT_DATA_MODE` 环境变量）：
 
 ```bash
 # Linux/Mac
@@ -291,6 +299,17 @@ export AQUANT_DATA_MODE=auto   # 自动检测（默认，行为同test）
 
 # Windows
 set AQUANT_DATA_MODE=test
+```
+
+**数据来源**（推荐使用 `config.json` 持久化配置）：
+
+```bash
+# 方式1：通过 CLI 设置（推荐，写入 config/config.json）
+python main.py config --data-source eastmoney  # 使用东财API
+python main.py config --data-source database   # 使用本地数据库
+
+# 方式2：命令行参数（单次生效，临时覆盖配置文件）
+python main.py backtest --data-source eastmoney -s small_cap --start-date 2024-01-01 --end-date 2024-12-31
 ```
 
 ### 3. 生成测试数据
@@ -404,7 +423,7 @@ python main.py pool --add tech --stocks 000001.SZ,600000.SH  # 添加股票
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--source` | 数据模式：test=测试模式(优先数据库,可回退模拟) / real=真实模式(仅数据库) | 根据环境变量AQUANT_DATA_MODE |
+| `--source` | 数据模式：test=测试模式 / real=真实模式 / database=同real / mock=模拟 | 根据环境变量AQUANT_DATA_MODE |
 | `--sync` | 仅同步数据 | False |
 | `--validate` | 仅校验数据完整性 | False |
 | `--generate-test-data` | 仅生成测试数据CSV | False |
@@ -729,29 +748,14 @@ python main.py --quintile-backtest \
 
 ### 回测HTML报告生成
 
-```python
-from src.factors import Backtester
+回测完成后自动生成交互式 HTML 报告（Chart.js），无需额外操作：
 
-# 运行回测
-backtester = Backtester(initial_capital=1000000)
-backtester.load_data(price_data)
-result = backtester.run_backtest(factor, n_stocks=20, rebalance_freq=5)
+```bash
+# 运行回测，报告自动输出到 reports/ 目录
+python main.py backtest --strategy small_cap --start-date 2024-01-01 --end-date 2024-12-31
 
-# 生成HTML报告
-report_path = backtester.generate_report(
-    output_path="reports/my_strategy.html",
-    title="我的策略回测报告"
-)
-print(f"报告已生成: {report_path}")
-
-# 或使用快捷函数
-from src.factors import generate_backtest_report
-
-report_path = generate_backtest_report(
-    backtest_result=result,
-    output_path="reports/report.html",
-    title="回测分析报告"
-)
+# 或从已有结果生成报告
+python main.py result --html reports/backtest_0010_2024-01-01_2024-12-31
 ```
 
 ## 待办事项
@@ -778,7 +782,7 @@ report_path = generate_backtest_report(
 - **数据库**: SQLite (WAL模式)
 - **数据源**: 国金QMT (xtquant)
 - **机器学习**: scikit-learn, LightGBM
-- **可视化**: Streamlit, Plotly, ECharts (pyecharts)
+- **可视化**: Streamlit, Plotly, Chart.js, ECharts (pyecharts)
 - **因子计算**: 自研算法
 
 ## 版本历史
@@ -810,7 +814,7 @@ report_path = generate_backtest_report(
   - 增强Summary报表：统计卡片、ECharts图表、单调性检验、最佳/最差轮次高亮
   - 因子分类体系：13个分类（技术指标类9个 + 基本面类4个）
   - 基本面因子：估值因子（8个）、盈利因子（5个）、成长因子（5个）、质量因子（4个）
-  - 回测HTML报告：使用 ECharts 生成交互式报告
+  - 回测HTML报告：使用 Chart.js 生成交互式报告（净值曲线、K线图、个股权限、每日快照）
 
 - **v0.4.1** (2025): 测试数据与真实数据分离
   - 测试数据不再写入数据库，改为CSV文件存储

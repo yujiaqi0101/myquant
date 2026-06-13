@@ -104,7 +104,7 @@ scripts/
 `FactorService` 是策略统一的因子获取层——支持东财API和本地数据库两种后端，带自动缓存。策略在 `on_bar` 中通过 `service.get_factor(因子名, 日期)` 获取因子值。
 
 ### 凭证管理
-凭证和数据源配置存储在 `config/config.json`（已gitignore）。环境变量（`QMT_ACCOUNT`、`QMT_PASSWORD`、`EASTMONEY_TOKEN`、`AQUANT_DATA_SOURCE`）优先级更高。格式参考 `config/config.example.json`。
+凭证和数据源配置存储在 `config/config.json`（已gitignore）。命令行参数 `--data-source` 可临时覆盖配置文件。凭证环境变量（`QMT_ACCOUNT`、`QMT_PASSWORD`、`EASTMONEY_TOKEN`）优先级高于配置文件。格式参考 `config/config.example.json`。
 
 ### 执行价格选择
 回测引擎支持 `close`（当日收盘价）和 `next_open`（次日开盘价）两种执行方式，可避免未来函数。通过 `--rebalance-price` 或策略参数配置。

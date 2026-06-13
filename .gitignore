@@ -73,7 +73,20 @@ cython_debug/
 
 # 临时测试文件
 tests/test4.py
+tests/test6.py
 AGENTS.MD
+
+# 临时脚本/重构过程产物
+*modified*.py
+*refactored*.py
+_rebuild.py
+
+# 临时数据文件（运行时导出，不入库）
+*.csv
+docs/stock_pool_*
+docs/股票与ETF清单.xlsx
+docs/因子/
+symbol_infos_*.csv
 
 # 用户自定义策略（不提交git，保留核心策略）
 src/strategies/user_*.py

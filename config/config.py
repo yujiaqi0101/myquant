@@ -105,49 +105,34 @@ class DataMode:
     AUTO = "auto"      # 自动检测模式
 
 # ============================================================
-# 数据源配置（新增）
+# 数据源配置
 # ============================================================
-# AQUANT_DATA_SOURCE 环境变量控制数据来源
-# 可选值：
-#   - "database": 本地 SQLite 数据库（默认）
-#   - "eastmoney": 东财掘金 API
+# 通过 config/config.json 的 data_source.source 字段配置
+# CLI 命令：python main.py config --data-source eastmoney
+# 命令行参数 --data-source 可临时覆盖配置文件
 #
-# 示例：
-#   Linux/Mac:  export AQUANT_DATA_SOURCE=eastmoney
-#   Windows:    set AQUANT_DATA_SOURCE=eastmoney
-#
-DATA_SOURCE_CONFIG = {
-    "source": os.environ.get("AQUANT_DATA_SOURCE", "database"),
-}
 
 # 数据源常量
 class DataSource:
     DATABASE = "database"      # 本地 SQLite 数据库
     EASTMONEY = "eastmoney"    # 东财掘金 API
 
+
 def get_data_source() -> str:
     """
     获取当前数据源
 
-    优先级：环境变量 AQUANT_DATA_SOURCE > config.json > 默认值 'database'
+    优先级：config.json > 默认值 'database'
 
     Returns
     -------
     str
         数据源：'database' 或 'eastmoney'
     """
-    # 1. 环境变量（最高优先级）
-    env_source = os.environ.get("AQUANT_DATA_SOURCE")
-    if env_source:
-        return env_source
-
-    # 2. config.json 配置文件
     file_source = _CONFIG.get("data_source", {}).get("source")
     if file_source:
         return file_source
-
-    # 3. 默认值
-    return DATA_SOURCE_CONFIG["source"]
+    return "database"
 
 # 东财掘金配置（token 从 config.json credentials 字段读取）
 EASTMONEY_CONFIG = {

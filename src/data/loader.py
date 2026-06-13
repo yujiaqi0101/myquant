@@ -3,12 +3,12 @@
 ============
 
 提供便捷的数据加载和预处理功能。
-支持通过环境变量 AQUANT_DATA_MODE 配置选择数据源：
-- test: 使用 data/test_data/ 目录下的CSV测试数据
-- real: 使用数据库中的真实数据
-- auto: 自动检测（默认）
+支持通过环境变量 AQUANT_DATA_MODE 配置数据行为模式：
+- test: 优先数据库，为空时回退 data/test_data/ CSV测试数据
+- real: 仅使用数据库，为空则报错
+- auto: 自动检测（默认，行为同test）
 
-支持通过环境变量 AQUANT_DATA_SOURCE 配置数据来源：
+数据来源通过 config/config.json 的 data_source.source 字段配置：
 - database: 本地 SQLite 数据库（默认）
 - eastmoney: 东财掘金 API
 """
