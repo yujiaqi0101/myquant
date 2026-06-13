@@ -449,6 +449,80 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_versions_name ON strategy_versions(strategy_name)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_versions_active ON strategy_versions(is_active)')
 
+            # ============ Phase 6: quantlab_* 实验跟踪表 ============
+            # 4 张表与 src/quantlab/research/database.py 中 4 张表 schema 保持一致，
+            # 以便 MyquantTracker 写入 aquant.db、quantlab 原生 Tracker 写入 research.db
+            # 两边可独立运行，也可由 MyquantTracker 桥接。
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS quantlab_experiments (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    params_json TEXT,
+                    created_at TEXT NOT NULL,
+                    tag TEXT,
+                    note TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_exp_strategy ON quantlab_experiments(strategy)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_exp_tag ON quantlab_experiments(tag)')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS quantlab_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id TEXT NOT NULL,
+                    final_equity REAL DEFAULT 0,
+                    total_return REAL DEFAULT 0,
+                    sharpe REAL DEFAULT 0,
+                    max_drawdown REAL DEFAULT 0,
+                    trade_count INTEGER DEFAULT 0,
+                    win_rate REAL DEFAULT 0,
+                    source TEXT,
+                    extras_json TEXT,
+                    FOREIGN KEY (experiment_id) REFERENCES quantlab_experiments(id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_res_exp ON quantlab_results(experiment_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_res_sharpe ON quantlab_results(sharpe)')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS quantlab_walkforward (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id TEXT NOT NULL,
+                    n_windows INTEGER DEFAULT 0,
+                    avg_sharpe REAL DEFAULT 0,
+                    avg_return REAL DEFAULT 0,
+                    avg_max_dd REAL DEFAULT 0,
+                    stitched_sharpe REAL DEFAULT 0,
+                    stitched_return REAL DEFAULT 0,
+                    stitched_max_dd REAL DEFAULT 0,
+                    stability_score REAL DEFAULT 0,
+                    parameter_drift REAL DEFAULT 0,
+                    extras_json TEXT,
+                    FOREIGN KEY (experiment_id) REFERENCES quantlab_experiments(id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_wf_exp ON quantlab_walkforward(experiment_id)')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS quantlab_quintile_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    factor_name TEXT NOT NULL,
+                    q1_sharpe REAL DEFAULT 0,
+                    q2_sharpe REAL DEFAULT 0,
+                    q3_sharpe REAL DEFAULT 0,
+                    q4_sharpe REAL DEFAULT 0,
+                    q5_sharpe REAL DEFAULT 0,
+                    long_short_sharpe REAL DEFAULT 0,
+                    ic REAL DEFAULT 0,
+                    ir REAL DEFAULT 0,
+                    long_short_return REAL DEFAULT 0,
+                    extras_json TEXT,
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_q5_factor ON quantlab_quintile_results(factor_name)')
+
             logger.info(f"数据库初始化完成: {self.db_path}")
 
     # ============ 股票日频数据操作 ============

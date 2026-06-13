@@ -297,6 +297,27 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         help='数据源：database（本地数据库，默认）或 eastmoney（东财掘金API）'
     )
 
+    # ===== Phase 4 新增：quantlab 引擎选择 =====
+    parser.add_argument(
+        '--engine',
+        type=str,
+        default='auto',
+        choices=['auto', 'bar', 'event', 'vbt', 'tick', 'myquant'],
+        help='回测引擎：auto（按策略名 _v2 自动选择）/ bar（quantlab BarEngine）/ '
+             'event（quantlab EventEngine）/ vbt（quantlab VectorBTAdapter）/ '
+             'tick（quantlab TickEngine）/ myquant（myquant BacktestEngine，已废弃）'
+    )
+    parser.add_argument(
+        '--no-risk-check',
+        action='store_true',
+        help='禁用 A 股 RiskCheck（涨跌停/ST/T+1/新股/停牌）'
+    )
+    parser.add_argument(
+        '--no-execution-cost',
+        action='store_true',
+        help='禁用佣金和滑点（仅用于研究对比）'
+    )
+
 
 def load_price_data(
     start_date: str,
@@ -355,12 +376,60 @@ def load_price_data(
         return db.get_stock_daily(stock_codes=stock_codes, start_date=start_date, end_date=end_date)
 
 
+def _resolve_engine_choice(strategy_name: str, requested: str) -> str:
+    """
+    根据策略名和用户选择，决定实际使用的引擎。
+    返回 'myquant' | 'bar' | 'event' | 'vbt' | 'tick'
+    """
+    if requested == "auto":
+        # 策略名以 _v2 结尾 → 走 quantlab；否则保留 myquant（兼容旧 v1）
+        if strategy_name.endswith("_v2"):
+            return "bar"  # quantlab BarEngine（默认）
+        return "myquant"
+    return requested
+
+
+def _is_v2_strategy(strategy_name: str) -> bool:
+    """判断策略是否是 v2 (SignalStrategy)。"""
+    return strategy_name.endswith("_v2")
+
+
 def run_backtest_command(args: argparse.Namespace):
     """执行回测命令"""
-    
+
+    # 0. 自动发现 v2 策略（SignalStrategy）
+    from src.quantlab_adapters import discover_v2_strategies
+    discover_v2_strategies("src.strategies")
+
+    # 1. 自动发现 v1 策略（BaseStrategy）
+    StrategyRegistry.auto_discover("src.strategies")
+
+    # 2. 决定引擎
+    engine_choice = _resolve_engine_choice(args.strategy, args.engine)
+
+    # 3. 分发
+    if engine_choice == "myquant":
+        # 走 myquant 自研引擎（兼容 v1 策略）
+        return _run_myquant_backtest(args)
+    else:
+        # 走 quantlab 引擎（v2 策略 + 显式选择）
+        if not _is_v2_strategy(args.strategy):
+            # 用户显式选 quantlab，但策略是 v1 → 提示并自动 fallback
+            from src.quantlab_adapters import SignalStrategyRegistry
+            if SignalStrategyRegistry.get(args.strategy) is None:
+                print(
+                    f"[警告] 策略 '{args.strategy}' 是 v1 (BaseStrategy) 策略，"
+                    f"无法在 quantlab 引擎上运行。已自动切回 myquant BacktestEngine。"
+                )
+                return _run_myquant_backtest(args)
+        return _run_quantlab_backtest(args, engine_choice)
+
+
+def _run_myquant_backtest(args: argparse.Namespace):
+    """原有 myquant BacktestEngine 路径（v1 策略 / 兼容保留）。"""
     # 1. 自动发现策略
     StrategyRegistry.auto_discover('src.strategies')
-    
+
     # 2. 获取策略类
     strategy_class = StrategyRegistry.get(args.strategy)
     if strategy_class is None:
@@ -654,6 +723,295 @@ def run_backtest_command(args: argparse.Namespace):
         print(f"\n  HTML报告生成失败: {e}")
     
     print(f"\n回测完成！")
+    print(f"  日志ID: {log_id}")
+    print(f"  报告目录: {result_dir}")
+    print(f"\n绩效摘要：")
+    print(f"  总收益率: {result.total_return:.2%}")
+    print(f"  年化收益: {result.performance.get('annual_return', 0):.2%}")
+    print(f"  夏普比率: {result.performance.get('sharpe_ratio', 0):.2f}")
+    print(f"  最大回撤: {result.performance.get('max_drawdown', 0):.2%}")
+    print(f"  交易次数: {len(result.trades)}")
+
+
+# ============ quantlab 引擎路径（Phase 4 新增） ============
+
+
+def _build_quantlab_engine(engine_choice: str, strategy, initial_capital: float):
+    """
+    构造 quantlab 引擎实例。
+
+    engine_choice: 'bar' | 'event' | 'vbt' | 'tick'
+    """
+    from src.quantlab.execution import (
+        PercentageCommission,
+        PercentageSlippage,
+    )
+    from src.quantlab.portfolio_construction.top_n import TopN
+
+    from src.quantlab_extras import (
+        build_ashare_risk_manager,
+        build_ashare_execution,
+    )
+
+    # 1) 选 portfolio_constructor：默认 TopN(30) 来自策略 default_params
+    top_n = int(strategy.params.get("top_n", 30) if hasattr(strategy, "params") else 30)
+    # 退路：v2 策略常见的 top_n_* 命名
+    if top_n == 30:
+        for key in ("n_positions", "top_pct", "max_positions"):
+            if key in getattr(strategy, "params", {}):
+                v = strategy.params.get(key)
+                if isinstance(v, int) and v > 0 and v < 1000:
+                    top_n = v
+                    break
+    constructor = TopN(n=top_n)
+
+    # 2) 选 execution
+    execution = build_ashare_execution(
+        commission_rate=0.00025,
+        slippage_rate=0.0001,
+        lot_size=100,
+    )
+
+    if engine_choice == "bar":
+        from src.quantlab.engine import BarEngine
+        # BarEngine 接受独立的 commission/slippage 模型
+        return BarEngine(
+            strategy=strategy,
+            portfolio_constructor=constructor,
+            execution_model=execution,
+            commission_model=PercentageCommission(rate=0.00025),
+            slippage_model=PercentageSlippage(rate=0.0001),
+            initial_cash=initial_capital,
+        )
+
+    if engine_choice == "event":
+        from src.quantlab.event_engine import EventEngine
+        return EventEngine(
+            strategy=strategy,
+            portfolio_constructor=constructor,
+            execution_model=execution,
+            commission_model=PercentageCommission(rate=0.00025),
+            slippage_model=PercentageSlippage(rate=0.0001),
+            initial_cash=initial_capital,
+        )
+
+    if engine_choice == "vbt":
+        from src.quantlab.adapters.vectorbt_adapter import VectorBTAdapter
+        return VectorBTAdapter(
+            constructor=constructor,
+            fees=0.00025,
+            slippage=0.0001,
+            init_cash=initial_capital,
+        )
+
+    if engine_choice == "tick":
+        from src.quantlab.engine.tick_engine import TickEngine
+        return TickEngine(
+            strategy=strategy,
+            initial_cash=initial_capital,
+        )
+
+    raise ValueError(f"未知引擎: {engine_choice}")
+
+
+def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
+    """
+    quantlab 引擎回测路径（Phase 4 新增）。
+
+    流程：
+        1) 加载 v2 策略（SignalStrategy）
+        2) from_quantlab_db 读数据 → Dict[symbol, DataFrame]
+        3) 构造 quantlab 引擎
+        4) engine.run() → BacktestResult (quantlab)
+        5) to_myquant_result 转换 → myquant BacktestResult
+        6) 写库 + HTML 报告（同 v1 路径）
+    """
+    from src.quantlab_adapters import (
+        from_quantlab_db,
+        to_myquant_result,
+        SignalStrategyRegistry,
+    )
+    from src.quantlab_extras import build_ashare_risk_manager
+
+    # 1) 取策略类
+    strategy_class = SignalStrategyRegistry.get(args.strategy)
+    if strategy_class is None:
+        print(f"错误：未知 v2 策略 '{args.strategy}'")
+        print(
+            "可用 v2 策略:",
+            ", ".join(s["name"] for s in SignalStrategyRegistry.list_strategies()),
+        )
+        return
+
+    # 2) 构造策略实例
+    strategy = strategy_class()
+
+    # 3) 解析股票范围
+    stock_codes: Optional[list] = None
+    pool_name: Optional[str] = None
+
+    if args.pool and args.stocks:
+        print("错误：--pool 和 --stocks 不能同时使用")
+        return
+
+    if args.pool:
+        from src.data.database import DatabaseManager
+        db = DatabaseManager(_get_db_path())
+        stock_codes = db.get_stock_pool_members(args.pool)
+        if not stock_codes:
+            print(f"错误：股票池 '{args.pool}' 不存在或为空")
+            return
+        pool_name = args.pool
+
+    if args.stocks:
+        stock_codes = [s.strip() for s in args.stocks.split(",")]
+
+    # 4) 加载数据（含预热期，与 v1 对齐）
+    from datetime import timedelta
+    import time
+
+    warmup_days = 60
+    start_dt = pd.Timestamp(args.start_date)
+    warmup_start = (start_dt - timedelta(days=int(warmup_days * 1.5 + 10))).strftime("%Y-%m-%d")
+
+    print(f"[quantlab/{engine_choice}] 数据加载：")
+    print(f"  预热期: {warmup_start} ~ {args.start_date}")
+    print(f"  回测期: {args.start_date} ~ {args.end_date}")
+    if pool_name:
+        print(f"  股票池: {pool_name} ({len(stock_codes)} 只)")
+    elif stock_codes:
+        print(f"  股票列表: {len(stock_codes)} 只")
+
+    t0 = time.time()
+    data = from_quantlab_db(
+        db_path=_get_db_path(),
+        start_date=warmup_start,
+        end_date=args.end_date,
+        stock_codes=stock_codes,
+    )
+    print(f"  加载完成: {len(data)} 个 symbol, 耗时 {time.time() - t0:.1f}s")
+
+    if not data:
+        print("错误：未加载到任何数据，请检查日期范围与股票池")
+        return
+
+    # 5) 构造引擎
+    engine = _build_quantlab_engine(
+        engine_choice=engine_choice,
+        strategy=strategy,
+        initial_capital=args.initial_capital,
+    )
+
+    # 6) 跑回测
+    print(f"\n开始回测 [引擎={engine_choice}, 策略={args.strategy}]...")
+    t0 = time.time()
+    ql_result = engine.run(strategy=strategy, data=data, params=strategy.params)
+    elapsed = time.time() - t0
+    print(f"  回测耗时: {elapsed:.1f}s")
+    if hasattr(ql_result, "error") and ql_result.error:
+        print(f"[错误] {ql_result.error}")
+        return
+
+    # 7) 转换结果
+    result = to_myquant_result(
+        ql_result,
+        strategy_name=strategy_class.name or args.strategy,
+        initial_capital=args.initial_capital,
+    )
+
+    # 8) 写库 + 报告（与 v1 路径一致的输出格式）
+    from src.data.database import DatabaseManager
+    db = DatabaseManager(_get_db_path())
+
+    perf = result.performance
+    log_id = db.log_execution(
+        execution_type=f"backtest_quantlab_{engine_choice}",
+        factor_name=strategy_class.name or args.strategy,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        n_stocks=len(stock_codes) if stock_codes else 0,
+        total_return=result.total_return,
+        annual_return=perf.get("annual_return", 0),
+        sharpe_ratio=perf.get("sharpe_ratio", 0),
+        max_drawdown=perf.get("max_drawdown", 0),
+        win_rate=perf.get("win_rate", 0),
+        calmar_ratio=0,
+        volatility=perf.get("annual_volatility", 0),
+        params_json=json.dumps({"engine": engine_choice, **strategy.params}),
+    )
+
+    # 9) 保存报告目录
+    output_dir = Path(args.output_dir) / "quantlab"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.name:
+        report_name = args.name
+    else:
+        report_name = f"quantlab_{engine_choice}_{log_id:04d}_{args.start_date}_{args.end_date}"
+    result_dir = output_dir / report_name
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(result_dir / "performance.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "log_id": log_id,
+                "engine": engine_choice,
+                "strategy_name": result.strategy_name,
+                "start_date": result.start_date,
+                "end_date": result.end_date,
+                "initial_capital": result.initial_capital,
+                "final_value": result.final_value,
+                "total_return": result.total_return,
+                **result.performance,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    trades_data = [
+        {
+            "date": t.date.strftime("%Y-%m-%d"),
+            "stock_code": t.stock_code,
+            "direction": t.direction.name,
+            "action": t.action,
+            "price": t.price,
+            "quantity": t.quantity,
+            "pnl": t.pnl,
+            "reason": t.reason,
+        }
+        for t in result.trades
+    ]
+    with open(result_dir / "trades.json", "w", encoding="utf-8") as f:
+        json.dump(trades_data, f, indent=2, ensure_ascii=False)
+
+    snapshots_data = [
+        {
+            "date": s.date.strftime("%Y-%m-%d"),
+            "cash": s.cash,
+            "position_value": s.position_value,
+            "total_value": s.total_value,
+            "n_positions": s.n_positions,
+            "daily_pnl": s.daily_pnl,
+            "daily_return": s.daily_return,
+            "drawdown": s.drawdown,
+            "max_drawdown": s.max_drawdown,
+        }
+        for s in result.daily_snapshots
+    ]
+    with open(result_dir / "snapshots.json", "w", encoding="utf-8") as f:
+        json.dump(snapshots_data, f, indent=2, ensure_ascii=False)
+
+    # HTML 报告（v1 路径的同款）
+    from src.report import generate_html_report
+    try:
+        html_path = generate_html_report(result_dir)
+        print(f"  HTML报告: {html_path}")
+    except Exception as e:
+        print(f"  HTML报告生成失败: {e}")
+
+    print(f"\n[quantlab] 回测完成！")
+    print(f"  引擎: {engine_choice}")
     print(f"  日志ID: {log_id}")
     print(f"  报告目录: {result_dir}")
     print(f"\n绩效摘要：")

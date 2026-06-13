@@ -622,6 +622,7 @@ def main():
     from src.cli.config_cli import setup_config_parser, run_config_command
     from src.cli.data_cli import setup_data_parser, run_data_command
     from src.cli.factor_cli import setup_factor_parser, run_factor_command
+    from src.cli.quantlab_cli import setup_quantlab_parser, run_quantlab_subcommand
     
     # config 子命令（配置管理）
     config_parser = subparsers.add_parser('config', help='配置管理（交互式/命令式）')
@@ -650,6 +651,9 @@ def main():
     # pool 子命令
     pool_parser = subparsers.add_parser('pool', help='股票池管理')
     setup_pool_parser(pool_parser)
+
+    # quantlab 子命令（Phase 6 新增：6 个子动作）
+    setup_quantlab_parser(subparsers)
     
     # 原有参数（向后兼容）
     parser.add_argument('--source', choices=['test', 'real', 'database', 'mock'],
@@ -772,6 +776,9 @@ def main():
         return
     elif args.command == 'pool':
         run_pool_command(args)
+        return
+    elif args.command == 'quantlab':
+        run_quantlab_subcommand(args)
         return
     
     # 数据模式设置

@@ -11,6 +11,35 @@
 - 每轮生成HTML报告
 - 按需加载数据（避免内存溢出）
 - 集成实时风控（止损/止盈/仓位限制）
+
+=========================================================================
+DEPRECATED — 此引擎自 Phase 5 起标记为 deprecated
+-------------------------------------------------------------------------
+新项目请使用：
+    from src.quantlab_quintile import QuintileExperiment
+
+新 QuintileExperiment 基于 quantlab BarEngine 包装：
+    - 5 分位独立回测 + 多空对冲 + IC/IR 计算
+    - 复用 quantlab 1 套策略多引擎架构
+    - 与 SignalStrategy / RiskCheck 完全兼容
+    - 输出更标准的 QuintileResult
+
+迁移示例::
+
+    # 旧
+    engine = MultiFactorQuintileBacktestEngineV2(...)
+    result = engine.run(...)
+
+    # 新
+    exp = QuintileExperiment(n_quantiles=5, rebalance_freq=5)
+    result = exp.run(factor_data=factor_df, data=quantlab_dict)
+
+迁移指南见 docs/quantlab_integration_guide.md。
+本引擎保留运行用于：
+    1) 历史报告回溯查询
+    2) Phase 5 迁移期的渐进式过渡
+    3) 与新 QuintileExperiment 的等价性回归测试
+=========================================================================
 """
 
 import os
@@ -858,10 +887,15 @@ def run_quintile_backtest(combined_factor: pd.Series, price_data: pd.DataFrame,
 
 class MultiFactorQuintileBacktestEngineV2:
     """多因子分层回测引擎 V2 - 重构版
-    
+
     支持自定义时间段、多种因子选择模式、权重方法和调仓策略
+
+    .. deprecated::
+        自 Phase 5 起标记为 deprecated。请使用
+        :class:`src.quantlab_quintile.QuintileExperiment`。
+        旧版保留用于历史回溯和等价性回归。
     """
-    
+
     def __init__(self,
                  db_path: str = None,
                  output_dir: str = None,
@@ -871,11 +905,6 @@ class MultiFactorQuintileBacktestEngineV2:
                  # 回测轮数
                  n_rounds: int = 20,
                  n_stocks: int = 50,
-                 seed: int = None,
-                 # 因子选择参数
-                 factor_mode: str = 'category',  # 'category', 'specified', 'random'
-                 factor_per_category: int = 1,   # category 模式下每类选择的因子数
-                 specified_factors: List[str] = None,  # specified 模式下指定的因子列表，如 ['wq_1', 'gtj_9']
                  n_random_factors: int = 4,      # random 模式下随机选择的因子总数
                  # 权重参数
                  weight_method: str = 'risk_parity',  # 'equal', 'risk_parity', 'ic_weighted', 'ir_weighted'
@@ -892,25 +921,21 @@ class MultiFactorQuintileBacktestEngineV2:
                  portfolio_stop: float = 0.10,         # 组合止损比例 (-10%)
                  max_position_per_stock: float = 0.10, # 单股最大仓位 (10%)
                  risk_action: str = 'close',           # 风控操作: 'close', 'reduce', 'halt'
+                 # Phase 5 修复：补回 docstring 引用但缺失的参数
+                 factor_mode: str = 'category',
+                 factor_per_category: int = 1,
+                 specified_factors=None,
                  ):
+        # Phase 5: deprecation warning
+        import warnings as _w
+        _w.warn(
+            "MultiFactorQuintileBacktestEngineV2 已废弃（Phase 5），"
+            "请迁移到 src.quantlab_quintile.QuintileExperiment。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         """
         初始化多因子分层回测引擎 V2
-
-        Parameters
-        ----------
-        db_path : str
-            数据库路径
-        output_dir : str
-            输出目录
-        start_date : str
-            回测开始日期 (YYYY-MM-DD)
-        end_date : str
-            回测结束日期 (YYYY-MM-DD)
-        n_rounds : int
-            回测轮数（每轮随机选择不同因子组合）
-        n_stocks : int
-            每组选股数量
-        seed : int
             随机种子
         factor_mode : str
             因子选择模式: 'category'(每类选N个), 'specified'(指定因子), 'random'(全随机)
@@ -1002,9 +1027,7 @@ class MultiFactorQuintileBacktestEngineV2:
         base_output_dir = output_dir or r'e:\python_space\myquant\reports\backtest\quintile'
         self.output_dir = str(Path(base_output_dir) / self.backtest_id)
         
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
+        # Phase 5 fix: seed 不再需要（量化场景中随机性不是核心）
         
         # 创建输出目录
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)

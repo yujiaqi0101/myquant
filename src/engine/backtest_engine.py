@@ -6,7 +6,30 @@
 - 策略层出场检查（通过 strategy.exit_checker）
 - 风控集成
 - 完整的每日账户记录（支持逐日检查）
+
+=========================================================================
+DEPRECATED — 此引擎自 Phase 4 起标记为 deprecated
+-------------------------------------------------------------------------
+新项目请使用：
+    from src.quantlab.engine import BarEngine
+    from src.quantlab_adapters import (
+        to_quantlab_dict,
+        build_ashare_risk_manager,
+        build_ashare_execution,
+    )
+
+新策略请继承 SignalStrategy：
+    from src.quantlab.signals.base import SignalStrategy
+
+迁移指南见 docs/quantlab_integration_guide.md（Phase 7 撰写）。
+本引擎保留运行用于：
+    1) Phase 2 的策略等价性测试（v1 vs v2 行为对比）
+    2) 6 个 v1 策略的旧 CLI 调用
+    3) 渐进式迁移的过渡期
+=========================================================================
 """
+
+import warnings
 
 from typing import Dict, List, Optional, Any
 import pandas as pd
@@ -17,8 +40,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .types import (
-    Order, TradeRecord, Position, DailySnapshot, 
+    Order, TradeRecord, Position, DailySnapshot,
     BacktestResult, Context, Direction
+)
+
+
+# -------------------------------------------------------------------------
+# 触发 DeprecationWarning（模块导入时）
+# -------------------------------------------------------------------------
+warnings.warn(
+    "src.engine.backtest_engine.BacktestEngine 已废弃（Phase 4），"
+    "请迁移到 src.quantlab.engine.BarEngine + SignalStrategy。"
+    "本引擎仅保留用于 v1 策略与等价性测试。",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
 
