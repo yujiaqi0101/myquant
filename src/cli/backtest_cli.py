@@ -288,15 +288,6 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         help='报告名称（默认自动生成）'
     )
 
-    # 数据源参数
-    parser.add_argument(
-        '--data-source',
-        type=str,
-        default=None,
-        choices=['database', 'eastmoney'],
-        help='数据源：database（本地数据库，默认）或 eastmoney（东财掘金API）'
-    )
-
     # ===== Phase 4 新增：quantlab 引擎选择 =====
     parser.add_argument(
         '--engine',

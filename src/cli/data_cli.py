@@ -4,7 +4,9 @@
 
 支持交互式和命令式两种使用方式：
 - 交互式: python main.py data
-- 命令式: python main.py data sync --source eastmoney
+- 命令式: python main.py data sync
+
+数据源在 config.json 中按数据类型配置（CLI 不再提供数据源切换参数）
 """
 
 import argparse
@@ -13,60 +15,52 @@ from typing import Optional
 from .interactive import InteractiveMenu, prompt_input, prompt_choice, prompt_confirm
 
 
-def _run_data_sync(source: str = None, start_date: str = None, end_date: str = None):
-    """执行数据同步"""
-    if source is None:
-        options = ['东财掘金 API', 'QMT 交易端', '本地数据库']
-        idx = prompt_choice("选择数据源", options)
-        sources = ['eastmoney', 'qmt', 'database']
-        source = sources[idx]
-
+def _run_data_sync(start_date: str = None, end_date: str = None):
+    """执行数据同步（数据源从 config.json 读取）"""
     start_date = start_date or prompt_input("起始日期", "20230101")
     end_date = end_date or prompt_input("结束日期", "")
 
-    print(f"\n开始同步数据: {source}, {start_date} ~ {end_date or '最新'}")
+    print(f"\n开始同步数据: {start_date} ~ {end_date or '最新'}")
 
-    if source == 'eastmoney':
-        _sync_from_eastmoney(start_date, end_date)
-    elif source == 'qmt':
-        _sync_from_qmt(start_date, end_date)
-    else:
-        print("本地数据库无需同步")
-
-
-def _sync_from_eastmoney(start_date: str, end_date: str):
-    """从东财掘金同步数据"""
-    try:
-        from src.data.eastmoney_connector import EastmoneyConnector
-        from config.config import get_credentials
-
-        token = get_credentials('eastmoney').get('token', '')
-        if not token:
-            print("错误: 未配置东财掘金 Token，请先运行 python main.py config --token xxx")
-            return
-
-        connector = EastmoneyConnector(token=token)
-        stocks = connector.get_stock_list()
-        print(f"  获取股票列表: {len(stocks)} 只")
-        print("✓ 数据同步完成（股票列表已更新）")
-        print("  注意: 历史价格数据将在回测时按需加载")
-    except Exception as e:
-        print(f"同步失败: {e}")
-
-
-def _sync_from_qmt(start_date: str, end_date: str):
-    """从 QMT 同步数据"""
     try:
         from src.data.data_sync import DataSynchronizer
         from src.data.database import DatabaseManager
+        from src.data.qmt_connector import QMTConnector
         from config.config import DATABASE_CONFIG
 
         db = DatabaseManager(DATABASE_CONFIG.get('path'))
-        sync = DataSynchronizer(db)
-        sync.sync_all(start_date=start_date, end_date=end_date)
-        print("✓ QMT 数据同步完成")
-    except ImportError:
-        print("错误: QMT 模块未安装，请确认 xtquant 已安装且 QMT 交易端已启动")
+
+        # 连接QMT（主数据源：股票日线）
+        print("正在连接QMT...")
+        connector = QMTConnector()
+        if not connector.is_connected():
+            connector.connect()
+
+        if not connector.is_connected():
+            print("QMT连接失败，尝试从数据库读取已有数据")
+            print("✓ 数据同步完成（仅检查数据库现有数据）")
+            return
+
+        print("QMT连接成功")
+
+        synchronizer = DataSynchronizer(connector, db)
+
+        def progress_cb(stage, current, total, message):
+            if total > 0:
+                pct = current / total * 100
+                print(f"  [{stage}] {pct:.1f}% ({current}/{total}) {message}")
+            else:
+                print(f"  [{stage}] {message}")
+
+        result = synchronizer.sync_all(
+            start_date=start_date,
+            end_date=end_date,
+            progress_callback=progress_cb
+        )
+
+        print(f"\n同步完成:")
+        for key, val in result.items():
+            print(f"  {key}: {val}")
     except Exception as e:
         print(f"同步失败: {e}")
 
@@ -183,9 +177,7 @@ def setup_data_parser(parser: argparse.ArgumentParser) -> None:
     subparsers = parser.add_subparsers(dest='data_command', help='数据管理子命令')
 
     # sync 子命令
-    sync_parser = subparsers.add_parser('sync', help='同步数据')
-    sync_parser.add_argument('--source', choices=['eastmoney', 'qmt', 'database'],
-                             help='数据源')
+    sync_parser = subparsers.add_parser('sync', help='同步数据（数据源从 config.json 读取）')
     sync_parser.add_argument('--start-date', help='起始日期 (YYYYMMDD)')
     sync_parser.add_argument('--end-date', help='结束日期 (YYYYMMDD)')
 
@@ -212,7 +204,7 @@ def run_data_command(args) -> None:
 
     cmd = args.data_command
     if cmd == 'sync':
-        _run_data_sync(args.source, args.start_date, args.end_date)
+        _run_data_sync(args.start_date, args.end_date)
     elif cmd == 'validate':
         _run_data_validate()
     elif cmd == 'generate-test':

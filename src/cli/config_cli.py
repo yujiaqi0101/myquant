@@ -173,8 +173,6 @@ def setup_config_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--token', help='设置东财掘金 Token')
     parser.add_argument('--qmt-account', help='设置 QMT 账号')
     parser.add_argument('--qmt-password', help='设置 QMT 密码')
-    parser.add_argument('--data-source', choices=['eastmoney', 'database', 'qmt'],
-                        help='设置默认数据源')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                         help='设置日志级别')
     parser.add_argument('--show', action='store_true', help='显示当前配置')
@@ -185,7 +183,7 @@ def run_config_command(args) -> None:
     # 如果没有传任何参数，进入交互模式
     has_args = any([
         args.token, args.qmt_account, args.qmt_password,
-        args.data_source, args.log_level, args.show
+        args.log_level, args.show
     ])
 
     if not has_args:
@@ -201,9 +199,6 @@ def run_config_command(args) -> None:
 
     if args.qmt_account:
         set_qmt_account(args.qmt_account, args.qmt_password)
-
-    if args.data_source:
-        set_data_source(args.data_source)
 
     if args.log_level:
         set_log_level(args.log_level)

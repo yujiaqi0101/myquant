@@ -523,9 +523,237 @@ class DatabaseManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_q5_factor ON quantlab_quintile_results(factor_name)')
 
+            # ============ P0 新增表：飞书文档"## 数据库"章节补全 ============
+
+            # 除权除息日表（飞书"系统表 - 除权除息日"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dividend_date (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code VARCHAR(20) NOT NULL,
+                    ex_date DATE NOT NULL,
+                    record_date DATE,
+                    pay_date DATE,
+                    dividend_per_share REAL DEFAULT 0,
+                    split_ratio REAL DEFAULT 1.0,
+                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(stock_code, ex_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dividend_code ON dividend_date(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dividend_date ON dividend_date(ex_date)')
+
+            # ETF 基本信息表（飞书"ETF - ETF基本信息"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS etf_info (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    etf_code VARCHAR(20) NOT NULL UNIQUE,
+                    etf_name TEXT,
+                    underlying_index VARCHAR(50),
+                    list_date DATE,
+                    fund_manager TEXT,
+                    total_share REAL,
+                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # ETF 成分股表（按 trade_date 维度的成分）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS etf_constituent (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    etf_code VARCHAR(20) NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
+                    trade_date DATE NOT NULL,
+                    amount REAL,
+                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(etf_code, stock_code, trade_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_etf ON etf_constituent(etf_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_stock ON etf_constituent(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_date ON etf_constituent(trade_date)')
+
+            # ETF 日频数据表（飞书"ETF - ETF日频数据"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS etf_daily (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date DATE NOT NULL,
+                    etf_code VARCHAR(20) NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, etf_code)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_daily_code ON etf_daily(etf_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_daily_date ON etf_daily(trade_date)')
+
+            # 指数基本信息表（飞书"指数 - 指数基本信息"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS index_info (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    index_code VARCHAR(20) NOT NULL UNIQUE,
+                    index_name TEXT,
+                    index_type VARCHAR(20),
+                    publish_date DATE,
+                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 板块基本信息表（飞书"板块 - 板块基本信息"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sector_info (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sector_code VARCHAR(50) NOT NULL UNIQUE,
+                    sector_name TEXT,
+                    sector_type VARCHAR(20) DEFAULT 'concept',
+                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 板块成分股表（飞书"板块 - 板块成分股" → 通达信）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sector_constituent (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sector_code VARCHAR(50) NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
+                    trade_date DATE NOT NULL,
+                    source VARCHAR(50) DEFAULT 'tdx',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(sector_code, stock_code, trade_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_sector ON sector_constituent(sector_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_stock ON sector_constituent(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_date ON sector_constituent(trade_date)')
+
+            # 因子组合表（飞书"因子 - 因子组合"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS factor_combination (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    combo_name TEXT NOT NULL,
+                    factor_names TEXT NOT NULL,
+                    weight_method VARCHAR(30) DEFAULT 'equal',
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 策略基本信息表（飞书"策略 - 策略基本信息"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy_info (
+                    strategy_id TEXT PRIMARY KEY,
+                    strategy_name TEXT NOT NULL,
+                    description TEXT,
+                    applicable_scenario TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 策略标签表（飞书"策略 - 策略标签"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy_tag (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id TEXT NOT NULL,
+                    tag_name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(strategy_id, tag_name),
+                    FOREIGN KEY (strategy_id) REFERENCES strategy_info(strategy_id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_tag_strategy ON strategy_tag(strategy_id)')
+
+            # 策略最佳表现表（飞书"策略 - 策略最佳表现"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy_best_perf (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id TEXT NOT NULL,
+                    best_experiment_id TEXT,
+                    best_source TEXT,
+                    best_metric TEXT,
+                    best_value REAL,
+                    best_sharpe REAL,
+                    best_max_drawdown REAL,
+                    best_annual_return REAL,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(strategy_id),
+                    FOREIGN KEY (strategy_id) REFERENCES strategy_info(strategy_id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_best_perf_strategy ON strategy_best_perf(strategy_id)')
+
+            # 因子执行日志表（飞书"因子 - 因子执行日志"）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS factor_execution_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    factor_name TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    execution_time_ms REAL,
+                    status TEXT,
+                    error_message TEXT,
+                    executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_factor_execution_log_factor ON factor_execution_log(factor_name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_factor_execution_log_date ON factor_execution_log(trade_date)')
+
+            # 估值数据表（飞书"估值数据"，原 valuation_result 是分析结果而非原始数据）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS valuation_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    pe_ttm REAL,
+                    pb_mrq REAL,
+                    ps_ttm REAL,
+                    pcf_ttm REAL,
+                    a_mv REAL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(symbol, trade_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_valuation_data_symbol_date ON valuation_data(symbol, trade_date)')
+
             logger.info(f"数据库初始化完成: {self.db_path}")
 
     # ============ 股票日频数据操作 ============
+
+    def _filter_simulated(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        过滤掉 is_simulated=True 的模拟数据行（飞书"模拟数据绝不写入数据库"原则）
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            待过滤数据
+
+        Returns
+        -------
+        pd.DataFrame
+            过滤后的数据（已去除 is_simulated=True 行）
+        """
+        if df.empty:
+            return df
+        if 'is_simulated' in df.columns:
+            mask = df['is_simulated'].astype(str).str.lower().isin(['true', '1', 'yes'])
+            n_filtered = int(mask.sum())
+            if n_filtered > 0:
+                logger.warning(
+                    f"过滤掉 {n_filtered} 行模拟数据 (is_simulated=True)，遵循飞书原则：模拟数据绝不写入数据库"
+                )
+            return df[~mask].copy()
+        return df
 
     def insert_stock_daily(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
         """
@@ -536,6 +764,11 @@ class DatabaseManager:
         int
             插入的记录数
         """
+        if df.empty:
+            return 0
+
+        # 过滤掉模拟数据（飞书"模拟数据绝不写入数据库"原则）
+        df = self._filter_simulated(df)
         if df.empty:
             return 0
 

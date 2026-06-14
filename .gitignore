@@ -94,3 +94,7 @@ src/strategies/user_*.py
 # IDE/工具
 .trae/
 .claude/
+
+# 飞书抓取临时文件
+feishu_auth_qr*.png
+feishu_doc_raw.json

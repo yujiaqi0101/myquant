@@ -4,13 +4,10 @@ A股量化分析系统
 
 主入口文件
 
-数据模式说明：
-- 通过环境变量 AQUANT_DATA_MODE 配置运行时行为
-- test:  测试模式 - 优先从数据库读取市场数据，数据库为空时回退到模拟数据
-           模拟数据（标的、K线等）绝不写入数据库
-           执行日志、分析结果等运行产出正常写入数据库
-- real:  真实模式 - 所有市场数据只从数据库读取，数据库为空则报错退出
-- auto:  自动检测（默认）- 行为同 test 模式
+数据读取约定（hard constraints）：
+- 所有市场数据严格从数据库读取
+- 数据库为空时直接报错退出
+- AQUANT_DATA_MODE 模式已删除，不再支持模拟数据回退
 """
 
 import sys
@@ -75,7 +72,6 @@ def run_analysis(db=None, data_loader=None, used_mock_data=False):
     """
     # 打印数据源信息
     print("\n" + "-" * 50)
-    print(f"数据模式: {get_data_mode()}")
     if used_mock_data:
         print("⚠  警告: 当前使用了模拟数据（数据库为空，已自动回退）")
         print("         分析结果仅供参考，不代表真实市场情况")
@@ -656,9 +652,6 @@ def main():
     setup_quantlab_parser(subparsers)
     
     # 原有参数（向后兼容）
-    parser.add_argument('--source', choices=['test', 'real', 'database', 'mock'],
-                        default=None,
-                        help='数据模式: test=测试模式(优先数据库,可回退模拟), real=真实模式(仅数据库), database=同real (默认根据环境变量AQUANT_DATA_MODE)')
     parser.add_argument('--sync', action='store_true', help='仅同步数据（不运行分析）')
     parser.add_argument('--validate', action='store_true', help='仅校验数据完整性')
     parser.add_argument('--generate-test-data', action='store_true', help='仅生成测试数据CSV文件')
@@ -749,7 +742,7 @@ def main():
 
     # 无参数时显示帮助信息
     if args.command is None and not any([
-        args.source, args.sync, args.validate, args.generate_test_data,
+        args.sync, args.validate, args.generate_test_data,
         args.list_factors, args.quintile_backtest, args.multi_factor_backtest,
     ]):
         parser.print_help()
@@ -780,23 +773,8 @@ def main():
     elif args.command == 'quantlab':
         run_quantlab_subcommand(args)
         return
-    
-    # 数据模式设置
-    if args.source == 'test':
-        from config import config as config_module
-        config_module.DATA_MODE_CONFIG["mode"] = 'test'
-    elif args.source in ('real', 'database'):
-        from config import config as config_module
-        config_module.DATA_MODE_CONFIG["mode"] = 'real'
 
-    current_mode = get_data_mode()
-    mode_display = {
-        'test': '测试模式 (优先数据库,可回退模拟数据)',
-        'real': '真实模式 (仅数据库,为空则报错)',
-        'auto': '自动检测 (默认,行为同测试模式)',
-    }
-
-    # 初始化日志
+    # 初始化日志（AQUANT_DATA_MODE 已删除，不再打印数据模式）
     import logging
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logger = setup_logger(
@@ -807,7 +785,6 @@ def main():
     logger.info("=" * 60)
     logger.info("A股量化分析系统 v0.5.0 (数据分离版)")
     logger.info("=" * 60)
-    logger.info(f"数据模式: {mode_display.get(current_mode, current_mode)}")
     logger.info(f"日志级别: {args.log_level}")
     if not args.no_log_file:
         from src.utils.logger import LOG_DIR
@@ -816,6 +793,17 @@ def main():
 
     # 数据库路径
     db_path = str(project_root / DATABASE_CONFIG["path"])
+
+    # 启动信息：显示数据库路径 + 最新交易日（飞书"## CLI 启动信息"要求）
+    print(f"\n[系统启动信息]")
+    print(f"  数据库: {db_path}")
+    try:
+        db_check = DatabaseManager(db_path)
+        latest_date = db_check.get_data_summary().get('stock_daily', {}).get('end_date') or 'N/A'
+        print(f"  最新交易日: {latest_date}")
+    except Exception:
+        print(f"  最新交易日: N/A (数据库未初始化)")
+    print()
 
     # 0. 因子注册表查询（优先处理，不需要数据模式）
     if args.list_factors:
@@ -875,41 +863,19 @@ def main():
         )
         return
 
-    # 2. 根据数据模式加载数据并运行分析
-    print("\n[运行分析]")
+    # 加载并运行分析（AQUANT_DATA_MODE 已删除，仅数据库模式）
+    print("\n[运行分析] 模式: 真实数据 (仅数据库)")
     db = DatabaseManager(db_path)
+    summary = db.get_data_summary()
+    if summary['stock_daily']['count'] == 0:
+        print("\n   ✗ 数据库为空，无法运行分析!")
+        print("   请先通过以下方式之一准备数据：")
+        print("   1. 同步 QMT 数据: python main.py data sync")
+        print("   2. 生成测试数据: python main.py data generate-test")
+        return
 
-    if current_mode == DataMode.REAL:
-        # ====== 真实模式：只从数据库读取，为空则报错 ======
-        print("   模式: 真实数据 (仅数据库)")
-        summary = db.get_data_summary()
-        if summary['stock_daily']['count'] == 0:
-            print("\n   ✗ 数据库为空，真实模式下无法运行!")
-            print("   请选择以下方式之一：")
-            print("   1. 切换到测试模式: python main.py --source test")
-            print("   2. 同步QMT数据:  python main.py --sync  (账号密码从config/config.json读取)")
-            print("      或命令行指定:    python main.py --sync --account 你的账号 --password 你的密码")
-            print("   3. 生成模拟数据CSV: python main.py --generate-test-data")
-            return
-
-        print(f"   ✓ 数据库数据: {summary['stock_daily']['count']} 条记录")
-        run_analysis(db=db, data_loader=None, used_mock_data=False)
-
-    else:
-        # ====== 测试模式：优先数据库，为空则回退模拟数据 ======
-        print("   模式: 测试模式 (优先数据库,可回退模拟数据)")
-        summary = db.get_data_summary()
-        has_real_data = summary['stock_daily']['count'] > 0
-
-        if has_real_data:
-            # 数据库有数据，直接用数据库的
-            print(f"   ✓ 数据库有数据 ({summary['stock_daily']['count']} 条记录)，使用数据库")
-            run_analysis(db=db, data_loader=None, used_mock_data=False)
-        else:
-            # 数据库为空，回退到模拟数据
-            print("   ⚠ 数据库为空，回退到模拟数据 (CSV)")
-            data_loader = DataLoader.from_test_data()
-            run_analysis(db=db, data_loader=data_loader, used_mock_data=True)
+    print(f"   ✓ 数据库数据: {summary['stock_daily']['count']} 条记录")
+    run_analysis(db=db, data_loader=None, used_mock_data=False)
 
     print("\n" + "=" * 60)
     print("分析完成！")
@@ -917,15 +883,9 @@ def main():
 
     print(f"\n数据目录:")
     print(f"  数据库: {db_path}")
-    print(f"  模拟数据: {TEST_DATA_DIR}")
-    
-    print(f"\n环境变量配置:")
-    print(f"  export AQUANT_DATA_MODE=test   # 测试模式 (优先数据库,可回退)")
-    print(f"  export AQUANT_DATA_MODE=real   # 真实模式 (仅数据库)")
-    print(f"  export AQUANT_DATA_MODE=auto   # 自动检测 (默认,同test)")
 
     print(f"\n提示: 运行 'streamlit run src/visualization/dashboard.py' 启动可视化界面")
-    print("提示: 运行 'python main.py --generate-test-data' 生成模拟数据CSV")
+    print("提示: 运行 'python main.py data generate-test' 生成模拟数据CSV")
 
 
 if __name__ == "__main__":

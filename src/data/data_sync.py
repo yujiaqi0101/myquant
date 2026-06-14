@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 
 from .qmt_adapter import QMTDataAdapter
+from .inspector import DataInspector
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +157,11 @@ class DataSynchronizer:
             )
             self._log_sync('full_sync', start_time, end_time, total_records, 'success',
                            details=f'全量同步完成，耗时 {(end_time - start_time).total_seconds():.1f}s')
-
             logger.info(f"全量同步完成，耗时 {(end_time - start_time).total_seconds():.1f}s")
+
+            # ==== 同步闭环 (Task 9.4/9.5/9.6) ====
+            # sync_all → inspect → auto_resync，最多 3 轮直到无缺失
+            self._run_sync_inspect_loop(start_date, end_date, results)
 
         except Exception as e:
             logger.error(f"全量同步失败: {e}", exc_info=True)
@@ -167,6 +171,105 @@ class DataSynchronizer:
 
         self._report_progress(progress_callback, 'done', 5, 5, '全量同步完成')
         return results
+
+    def _run_sync_inspect_loop(
+        self,
+        start_date: str,
+        end_date: str,
+        results: Dict[str, Any],
+        max_rounds: int = 3,
+    ) -> None:
+        """
+        同步闭环：sync → inspect → auto_resync，最多 3 轮直到无缺失
+
+        Parameters
+        ----------
+        start_date, end_date : str
+            同步起止日期（YYYYMMDD）
+        results : dict
+            sync_all 的 results，循环过程中追加 'inspect' 字段
+        max_rounds : int
+            最大循环轮数（防止无限循环）
+        """
+        inspector = DataInspector(self.db)
+        # 转换日期格式：YYYYMMDD -> YYYY-MM-DD
+        def _fmt(d: str) -> str:
+            if len(d) == 8 and d.isdigit():
+                return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+            return d
+
+        inspect_results = []
+        for round_idx in range(1, max_rounds + 1):
+            logger.info(f"[sync→inspect→resync] 第 {round_idx}/{max_rounds} 轮检查")
+            inspect_result = inspector.inspect(
+                start_date=_fmt(start_date),
+                end_date=_fmt(end_date),
+                table='stock_daily',
+            )
+            inspect_results.append({
+                'round': round_idx,
+                'total_symbols': inspect_result.get('total_symbols', 0),
+                'missing_count': len(inspect_result.get('missing_symbols', [])),
+                'partial_count': len(inspect_result.get('partial_symbols', [])),
+            })
+
+            # 无缺失，退出循环
+            if (not inspect_result.get('missing_symbols') and
+                    not inspect_result.get('partial_symbols')):
+                logger.info(f"[sync→inspect→resync] 第 {round_idx} 轮无缺失，闭环完成")
+                break
+
+            # 自动补充缺失
+            refetched = self._auto_resync_missing(inspect_result, start_date, end_date)
+            inspect_results[-1]['refetched'] = refetched
+            if refetched == 0:
+                logger.info(f"[sync→inspect→resync] 第 {round_idx} 轮无可补充数据，停止")
+                break
+
+        results['inspect'] = inspect_results
+
+    def _auto_resync_missing(
+        self,
+        inspect_result: Dict[str, Any],
+        start_date: str,
+        end_date: str,
+    ) -> int:
+        """
+        自动补充缺失数据
+
+        Parameters
+        ----------
+        inspect_result : dict
+            DataInspector.inspect() 的返回
+        start_date, end_date : str
+            同步起止日期
+
+        Returns
+        -------
+        int
+            尝试补充的次数
+        """
+        # 取数据库中已有股票列表（不包括完全缺失的，避免对未上市股票反复请求）
+        missing = inspect_result.get('missing_symbols', [])
+        gaps = inspect_result.get('gaps', {})
+        n_attempts = 0
+
+        if missing:
+            logger.info(f"[_auto_resync_missing] {len(missing)} 只股票完全缺失，跳过（不在已上市范围内）")
+        if gaps:
+            # 仅尝试补充"有 partial 数据"的股票
+            partial_symbols = [s for s, _, _ in inspect_result.get('partial_symbols', [])]
+            for s in partial_symbols:
+                sym_gaps = gaps.get(s, [])
+                if not sym_gaps:
+                    continue
+                try:
+                    logger.info(f"[_auto_resync_missing] 补拉 {s}: {len(sym_gaps)} 天")
+                    self.sync_daily_data([s], start_date, end_date)
+                    n_attempts += len(sym_gaps)
+                except Exception as e:
+                    logger.warning(f"[_auto_resync_missing] {s} 补拉失败: {e}")
+        return n_attempts
 
     def sync_stock_list(self) -> list:
         """

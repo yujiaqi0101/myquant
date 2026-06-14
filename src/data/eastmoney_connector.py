@@ -163,6 +163,72 @@ class EastmoneyConnector:
         )
         return df
 
+    def get_dividend(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None,
+    ) -> pd.DataFrame:
+        """
+        获取股票除权除息信息
+
+        对应东财掘金 API: stk_get_dividend
+
+        Parameters
+        ----------
+        symbol : str
+            股票代码（掘金格式），如 'SHSE.600000'
+        start_date : str, optional
+            起始日期 'YYYY-MM-DD'
+        end_date : str, optional
+            结束日期 'YYYY-MM-DD'
+
+        Returns
+        -------
+        pd.DataFrame
+            除权除息信息，包含：
+            - ex_date: 除权除息日
+            - record_date: 股权登记日
+            - pay_date: 派息日
+            - dividend_per_share: 每股派息（元）
+            - split_ratio: 送转股比例
+        """
+        try:
+            from gm.api import stk_get_dividend
+        except ImportError:
+            logger.warning("gm.api.stk_get_dividend 不可用")
+            return pd.DataFrame()
+
+        try:
+            kwargs = {}
+            if start_date:
+                kwargs['start_date'] = start_date
+            if end_date:
+                kwargs['end_date'] = end_date
+
+            df = self._request_with_retry(stk_get_dividend, symbol=symbol, **kwargs)
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            # 标准化列名
+            rename_map = {
+                'ex_dividend_date': 'ex_date',
+                'ex_date': 'ex_date',
+                'record_date': 'record_date',
+                'pay_date': 'pay_date',
+                'dividend': 'dividend_per_share',
+                'split_ratio': 'split_ratio',
+            }
+            df = df.rename(columns=rename_map)
+
+            # 添加 stock_code 列
+            df['stock_code'] = symbol
+
+            return df
+        except Exception as e:
+            logger.warning(f"获取 {symbol} 除权除息信息失败: {e}")
+            return pd.DataFrame()
+
     def get_stock_list(self, trade_date: str = None) -> pd.DataFrame:
         """
         获取 A 股股票列表
