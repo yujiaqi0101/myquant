@@ -117,23 +117,33 @@ class DataInspector:
     def _count_actual(
         self, table: str, code_col: str, symbols: List[str], start_date: str, end_date: str
     ) -> Dict[str, int]:
-        """统计每只标的的实际记录数"""
+        """统计每只标的的实际记录数
+
+        注意 SQLite 数字字符串 vs dash 字符串在 type affinity 上不等价，
+        不能直接拼区间。改用两层 UNION（DASH + COMPACT）+ DISTINCT 计数。
+        """
         if not symbols:
             return {}
+        date_forms = self._candidate_date_forms(start_date, end_date)
         placeholders = ','.join('?' * len(symbols))
+        union_parts = []
+        params: List[Any] = []
+        for lo, hi in date_forms:
+            union_parts.append(
+                f"SELECT {code_col}, trade_date FROM {table} "
+                f"WHERE {code_col} IN ({placeholders}) "
+                f"AND trade_date >= ? AND trade_date <= ?"
+            )
+            params.extend([*symbols, lo, hi])
+        inner = " UNION ".join(union_parts)
+        sql = (
+            f"SELECT {code_col}, COUNT(DISTINCT trade_date) AS n "
+            f"FROM ({inner}) GROUP BY {code_col}"
+        )
         with self.db.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute(
-                f"""
-                SELECT {code_col}, COUNT(DISTINCT trade_date) as n
-                FROM {table}
-                WHERE {code_col} IN ({placeholders})
-                  AND trade_date >= ? AND trade_date <= ?
-                GROUP BY {code_col}
-                """,
-                (*symbols, start_date, end_date),
-            )
-            return {r[0]: r[1] for r in cur.fetchall()}
+            rows = conn.execute(sql, params).fetchall()
+            return {r[0]: r[1] for r in rows}
 
     def _find_gaps(
         self,
@@ -144,26 +154,40 @@ class DataInspector:
         end_date: str,
         trading_dates: List[str],
     ) -> List[str]:
-        """找某只标的缺失的具体日期"""
+        """找某只标的缺失的具体日期（兼容 YYYY-MM-DD / YYYYMMDD）"""
+        date_forms = self._candidate_date_forms(start_date, end_date)
+        union_parts = []
+        params: List[Any] = []
+        for lo, hi in date_forms:
+            union_parts.append(
+                f"SELECT trade_date FROM {table} "
+                f"WHERE {code_col} = ? AND trade_date >= ? AND trade_date <= ?"
+            )
+            params.extend([symbol, lo, hi])
+        sql = "SELECT DISTINCT trade_date FROM (" + " UNION ".join(union_parts) + ")"
         with self.db.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute(
-                f"""
-                SELECT DISTINCT trade_date
-                FROM {table}
-                WHERE {code_col} = ?
-                  AND trade_date >= ? AND trade_date <= ?
-                """,
-                (symbol, start_date, end_date),
-            )
-            present = {r[0] for r in cur.fetchall()}
-        # 兼容性：trade_date 可能是 'YYYY-MM-DD' 或 'YYYYMMDD'
+            rows = conn.execute(sql, params).fetchall()
+        present = {r[0] for r in rows}
         present_norm = {self._normalize_date(d) for d in present}
         gaps = []
         for d in trading_dates:
             if self._normalize_date(d) not in present_norm:
                 gaps.append(d)
         return gaps
+
+    @staticmethod
+    def _candidate_date_forms(start_date: str, end_date: str):
+        """返回若干 (lo, hi) 候选区间，覆盖 dash/compact 两种历史格式。"""
+        norm_lo = DataInspector._normalize_date(start_date)
+        norm_hi = DataInspector._normalize_date(end_date)
+        compact_lo = norm_lo.replace('-', '')
+        compact_hi = norm_hi.replace('-', '')
+        # 字典序大的优先
+        return sorted(
+            {(norm_lo, norm_hi), (compact_lo, compact_hi)},
+            key=lambda t: (t[0], t[1]),
+        )
 
     @staticmethod
     def _normalize_date(d: str) -> str:

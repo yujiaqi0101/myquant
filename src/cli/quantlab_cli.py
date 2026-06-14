@@ -341,6 +341,7 @@ def run_quantlab_command(args: argparse.Namespace) -> None:
 
     # 8) 写库（如果 --track）
     if args.track:
+        # 8a) 写 research.db（quantlab 原生表）
         try:
             from src.quantlab.research.tracker import (
                 ExperimentTracker, ExperimentRecord,
@@ -359,7 +360,29 @@ def run_quantlab_command(args: argparse.Namespace) -> None:
             tracker.run(record=record, engine=engine, data=data)
             print(f"\n  [TRACK] experiment_id={record.id} 已写入 research.db")
         except Exception as e:
-            print(f"  [TRACK] 写入失败: {e}")
+            print(f"  [TRACK] 写 research.db 失败: {e}")
+
+        # 8b) 写 aquant.db 的 quantlab_* 表（myquant 侧）
+        try:
+            from src.quantlab_adapters import MyquantTracker
+
+            my_tracker = MyquantTracker(
+                strategy_registry={args.strategy: strategy_class},
+                db_path=_get_db_path(),
+            )
+            # 重新跑一次以抽取 metrics（tracker.run 内部回测会再跑一遍，
+            # 接受小幅性能损失以保证 quantlab_* 表与 research.db 同步写入）
+            my_record = type(record)(
+                name=record.name,
+                strategy_name=record.strategy_name,
+                params=record.params,
+                tag=record.tag,
+                note=record.note,
+            )
+            my_tracker.run(record=my_record, engine=engine, data=data)
+            print(f"  [TRACK] experiment_id={my_record.id} 已写入 aquant.db.quantlab_experiments / quantlab_results")
+        except Exception as e:
+            print(f"  [TRACK] 写 quantlab_* 失败: {e}")
 
 
 # ============================================================
@@ -756,6 +779,84 @@ def walkforward_quantlab_command(args: argparse.Namespace) -> None:
         }, f, indent=2, ensure_ascii=False, default=str)
     print(f"\n  结果已保存: {out_file}")
 
+    # 6) 写入 aquant.db.quantlab_walkforward + 关联 experiments/results
+    try:
+        from src.quantlab.research.tracker import (
+            ExperimentTracker, ExperimentRecord,
+        )
+        from src.quantlab.research.database import Database
+        from src.quantlab_adapters import MyquantTracker
+
+        # 6a) quantlab_experiments + quantlab_results
+        record = ExperimentRecord(
+            name=name,
+            strategy_name=args.strategy,
+            params={"param_space": param_space,
+                    "train_years": args.train_years,
+                    "test_years": args.test_years},
+            tag="walkforward",
+            note=f"WF: {len(wf_result.windows)} windows",
+        )
+        my_tracker = MyquantTracker(
+            strategy_registry={args.strategy: strategy_class},
+            db_path=_get_db_path(),
+        )
+        # 用 wf_result.avg_test_sharpe 作为 sharpe 代理填入 results
+        wf_metrics = {
+            "sharpe": float(getattr(wf_result, "avg_test_sharpe", 0) or 0),
+            "total_return": float(getattr(wf_result, "avg_test_return", 0) or 0),
+            "max_drawdown": 0.0,
+            "trade_count": 0,
+            "win_rate": 0.0,
+            "source": f"walkforward:{engine_choice}",
+        }
+        my_tracker._save(record, wf_metrics)
+        print(f"  [WF-TRACK] experiment_id={record.id} 已写入 quantlab_experiments / quantlab_results")
+
+        # 6b) quantlab_walkforward
+        from src.data.database import DatabaseManager
+        # 计算 stability_score / parameter_drift 代理值
+        sharpes = [w.train_score for w in wf_result.windows]
+        if len(sharpes) >= 2:
+            mean_s = sum(sharpes) / len(sharpes)
+            std_s = (sum((s - mean_s) ** 2 for s in sharpes) / max(len(sharpes) - 1, 1)) ** 0.5
+            stability = round(mean_s / std_s, 4) if std_s > 0 else 0.0
+        else:
+            stability = 0.0
+        # 频次：所有窗口 best_params 中重复键的出现次数
+        all_param_keys = set()
+        for w in wf_result.windows:
+            all_param_keys.update(w.best_params.keys())
+        drift = round(1.0 - len([k for k in all_param_keys]) / max(len(all_param_keys), 1), 4) if all_param_keys else 0.0
+
+        with DatabaseManager(_get_db_path()).get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO quantlab_walkforward
+                (experiment_id, n_windows, avg_sharpe, avg_return,
+                 avg_max_dd, stitched_sharpe, stitched_return,
+                 stitched_max_dd, stability_score, parameter_drift, extras_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    len(wf_result.windows),
+                    round(wf_result.avg_test_sharpe, 4),
+                    round(wf_result.avg_test_return, 4),
+                    0.0,
+                    0.0, 0.0, 0.0,
+                    stability,
+                    drift,
+                    json.dumps({"engine": engine_choice, "name": name}, ensure_ascii=False),
+                ),
+            )
+        print(f"  [WF-TRACK] 已写入 quantlab_walkforward (stability={stability}, drift={drift})")
+    except Exception as e:
+        print(f"  [WF-TRACK] 写入失败: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 # ============================================================
 # sub-command: track
@@ -792,6 +893,26 @@ def setup_track_parser(parser: argparse.ArgumentParser) -> None:
     # delete
     p_del = sub.add_parser("delete", help="删除 experiment")
     p_del.add_argument("--id", required=True)
+
+    # rebuild-best-perf (Task 11.6)
+    sub.add_parser(
+        "rebuild-best-perf",
+        help="重建 strategy_best_perf 表（异常恢复/规则变更用）",
+    )
+
+    # 两表显示（best_perf + quantlab_results）
+    p_view = sub.add_parser(
+        "view", help="并列显示 strategy_best_perf + quantlab_results",
+    )
+    p_view.add_argument(
+        "--strategy", default=None, help="按 strategy 过滤",
+    )
+    p_view.add_argument(
+        "--tag", default=None, help="按 tag 过滤（quantlab_experiments.tag）",
+    )
+    p_view.add_argument(
+        "--limit", type=int, default=20, help="返回行数（默认 20）",
+    )
 
 
 def track_quantlab_command(args: argparse.Namespace) -> None:
@@ -870,8 +991,65 @@ def track_quantlab_command(args: argparse.Namespace) -> None:
         repo.delete(args.id)
         print(f"已删除 experiment: {args.id}")
 
+    elif args.track_action == "rebuild-best-perf":
+        from src.quantlab_adapters import rebuild_all_best_perf
+        from src.cli.backtest_cli import _get_db_path
+        try:
+            db_path = _get_db_path()
+        except Exception:
+            db_path = "data/aquant.db"
+        stats = rebuild_all_best_perf(db_path)
+        print(
+            f"\n[rebuild-best-perf] total={stats['total']} "
+            f"updated={stats['updated']} skipped={stats['skipped']}"
+        )
+
+    elif args.track_action == "view":
+        from src.cli.backtest_cli import _get_db_path
+        from src.quantlab_adapters import MyquantTracker
+        from src.data.database import DatabaseManager
+        try:
+            db_path = _get_db_path()
+        except Exception:
+            db_path = "data/aquant.db"
+        tracker = MyquantTracker(db_path=db_path)
+        df = tracker.search(
+            strategy=args.strategy,
+            tag=args.tag,
+        )
+        if df.empty:
+            print("无匹配 experiment。")
+            return
+        df = df.head(args.limit)
+        print(f"\n=== strategy_best_perf × quantlab_results (limit={args.limit}) ===")
+        # 拉 best_perf 对应行
+        db = DatabaseManager(db_path)
+        with db.get_connection() as conn:
+            best_rows = conn.execute(
+                """
+                SELECT strategy_id, best_experiment_id, best_sharpe,
+                       best_max_drawdown, best_annual_return, last_updated
+                FROM strategy_best_perf
+                """
+            ).fetchall()
+        best_map = {r["strategy_id"]: dict(r) for r in best_rows}
+        rows = []
+        for _, r in df.iterrows():
+            sid = r["strategy"]
+            best = best_map.get(sid)
+            rows.append({
+                "strategy": sid,
+                "exp_id": r["id"],
+                "sharpe": r.get("sharpe"),
+                "total_return": r.get("total_return"),
+                "is_best": "★" if best and best["best_experiment_id"] == r["id"] else "",
+                "best_sharpe": best["best_sharpe"] if best else None,
+            })
+        import pandas as _pd
+        print(_pd.DataFrame(rows).to_string(index=False))
+
     else:
-        print("请指定 track 子动作: list / show / leaderboard / search / delete")
+        print("请指定 track 子动作: list / show / leaderboard / search / delete / rebuild-best-perf / view")
 
 
 # ============================================================
@@ -1025,6 +1203,49 @@ def quintile_quantlab_command(args: argparse.Namespace) -> None:
             "ir": result.ir,
         }, f, indent=2, ensure_ascii=False, default=str)
     print(f"\n  结果已保存: {out_file}")
+
+    # 8) 写入 aquant.db.quantlab_quintile_results
+    try:
+        from src.data.database import DatabaseManager
+
+        def _q(q):
+            m = result.quintile_metrics.get(q, {})
+            return float(m.get("sharpe", 0) or 0)
+
+        def _ls(field):
+            m = result.long_short_metrics or {}
+            return float(m.get(field, 0) or 0)
+
+        with DatabaseManager(_get_db_path()).get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO quantlab_quintile_results
+                (factor_name, q1_sharpe, q2_sharpe, q3_sharpe,
+                 q4_sharpe, q5_sharpe, long_short_sharpe, ic, ir,
+                 long_short_return, extras_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    factor_path.stem,
+                    _q(1), _q(2), _q(3), _q(4), _q(5),
+                    _ls("sharpe"),
+                    round(float(result.ic_mean), 4),
+                    round(float(result.ir), 4),
+                    _ls("total_return"),
+                    json.dumps({
+                        "long_q": long_q, "short_q": short_q,
+                        "ic_std": result.ic_std,
+                        "max_drawdown": _ls("max_drawdown"),
+                    }, ensure_ascii=False),
+                    __import__("datetime").datetime.utcnow().isoformat(),
+                ),
+            )
+        print(f"  [Q5-TRACK] 已写入 quantlab_quintile_results (factor={factor_path.stem})")
+    except Exception as e:
+        print(f"  [Q5-TRACK] 写入失败: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ============================================================

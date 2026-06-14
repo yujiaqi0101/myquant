@@ -15,6 +15,7 @@
 - math: 数学算子（log, sign, signed_power, decay_linear, ...）
 - alpha101: WorldQuant 101 因子实现
 - alpha191: 国泰君安 191 因子实现
+- alpha158: Qlib Alpha158 核心算子
 """
 from .ts import (
     ts_mean, ts_std, ts_sum, ts_max, ts_min,
@@ -32,6 +33,7 @@ from .math_ops import (
 )
 from .alpha101 import ALPHA101_FUNCS
 from .alpha191 import ALPHA191_FUNCS
+from .alpha158 import ALPHA158_FUNCS, get_alpha158_func
 
 __all__ = [
     # 时序算子
@@ -47,4 +49,5 @@ __all__ = [
     'decay_linear', 'decay_exp',
     # 因子实现
     'ALPHA101_FUNCS', 'ALPHA191_FUNCS',
+    'ALPHA158_FUNCS', 'get_alpha158_func',
 ]

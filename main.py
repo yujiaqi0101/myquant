@@ -805,6 +805,20 @@ def main():
         print(f"  最新交易日: N/A (数据库未初始化)")
     print()
 
+    # 启动检查：补全 strategy_best_perf（飞书"Task 11.6 启动检查"约定）
+    try:
+        from src.quantlab_adapters import ensure_best_perf_fresh
+        stats = ensure_best_perf_fresh(db_path)
+        if stats.get("missing_fixed") or stats.get("stale_rebuilt"):
+            print(
+                f"  [best_perf 启动检查] "
+                f"missing_fixed={stats['missing_fixed']} "
+                f"stale_rebuilt={stats['stale_rebuilt']}"
+            )
+    except Exception as e:
+        # 数据库为空等情况下 ensure_best_perf_fresh 可能抛错，不影响启动
+        logger.debug(f"ensure_best_perf_fresh 跳过: {e}")
+
     # 0. 因子注册表查询（优先处理，不需要数据模式）
     if args.list_factors:
         print("\n[因子注册表查询]")

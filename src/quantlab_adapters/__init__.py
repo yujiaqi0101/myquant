@@ -25,6 +25,12 @@ from .strategy_registry import (
 from .tracker_adapter import (
     MyquantTracker,
 )
+from .best_perf_updater import (
+    update_strategy_best_perf,
+    rebuild_all_best_perf,
+    list_missing_best_perf,
+    ensure_best_perf_fresh,
+)
 
 
 __all__ = [
@@ -39,4 +45,9 @@ __all__ = [
     "discover_v2_strategies",
     # Phase 6 桥接
     "MyquantTracker",
+    # Phase 7 best_perf
+    "update_strategy_best_perf",
+    "rebuild_all_best_perf",
+    "list_missing_best_perf",
+    "ensure_best_perf_fresh",
 ]
