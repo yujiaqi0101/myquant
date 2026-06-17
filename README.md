@@ -264,7 +264,7 @@ aquant/
 | stock_info | 股票基本信息（代码、名称、行业、市值、交易所、产品类型等） |
 | index_constituent | 指数成分股数据（权重、市值、PE、PB等） |
 | qmt_instrument | QMT合约完整信息（名称、交易所、股本、涨跌停价等） |
-| trade_calendar | 交易日历（trade_date 主键） |
+| trade_calendar | 交易日历（trade_date 主键，全量同步1991至今） |
 | stock_pool | 股票池定义（pool_name 唯一、pool_code、description） |
 | stock_pool_member | 股票池成员（pool_id 外键、stock_code、added_date、removed_date） |
 | data_sync_log | 数据同步日志 |
@@ -522,12 +522,20 @@ set QMT_PATH=E:\国金QMT交易端模拟\userdata_mini
 
 ### 数据同步流程
 
-系统会按以下顺序同步数据：
-1. 获取全部股票/指数/ETF/基金列表
-2. 同步合约基本信息（名称、行业、股本等）
-3. 下载并同步日K线行情数据
-4. 同步板块数据和成分股
-5. 同步财务数据（资产负债表、利润表、现金流量表）
+系统会按以下顺序同步数据（13步）：
+1. 交易日历 → t_trading_date（全量同步1991至今，不受时间范围影响）
+2. 股票基本信息 → t_stock_info
+3. 股票日频数据 → t_stock_daily
+4. ETF基本信息 → t_etf_info
+5. ETF日频数据 → t_etf_daily
+6. 指数基本信息 → t_index_info
+7. 指数成分股 → t_stock_in_index
+8. 指数日频数据 → t_index_daily
+9. 板块基本信息 → t_sector_info
+10. 板块成分股 → t_stock_list_in_sector（通达信）
+11. 财务数据 → financial_data
+12. 估值数据 → t_valuation_data
+13. 除权除息 → t_dividend_date（当前账号无接口权限，已暂停同步）
 
 ### 数据校验
 

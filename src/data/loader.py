@@ -3,14 +3,8 @@
 ============
 
 提供便捷的数据加载和预处理功能。
-支持通过环境变量 AQUANT_DATA_MODE 配置数据行为模式：
-- test: 优先数据库，为空时回退 data/test_data/ CSV测试数据
-- real: 仅使用数据库，为空则报错
-- auto: 自动检测（默认，行为同test）
-
-数据来源通过 config/config.json 的 data_source.source 字段配置：
-- database: 本地 SQLite 数据库（默认）
-- eastmoney: 东财掘金 API
+数据来源统一从 config/config.json 的 data_source.routing 字段按数据类型路由。
+优先从数据库读取，数据库为空则报错。
 """
 
 from typing import Union, List, Optional
@@ -22,23 +16,8 @@ import os
 from .adapter import DailyDataAdapter, MockDataAdapter
 from .db_adapter import DatabaseAdapter
 
-# QMT 和东财掘金采用延迟导入，避免在不需要时加载 xtquant/gm
-_QMT_AVAILABLE = None  # None=未检测, True/False=已检测
+# 东财掘金采用延迟导入，避免在不需要时加载 gm
 _EASTMONEY_AVAILABLE = None
-
-
-def _check_qmt_available():
-    """延迟检测 QMT 是否可用"""
-    global _QMT_AVAILABLE
-    if _QMT_AVAILABLE is not None:
-        return _QMT_AVAILABLE
-    try:
-        from .qmt_connector import QMTConnector
-        from .data_sync import DataSynchronizer
-        _QMT_AVAILABLE = True
-    except ImportError:
-        _QMT_AVAILABLE = False
-    return _QMT_AVAILABLE
 
 
 def _check_eastmoney_available():
@@ -239,73 +218,6 @@ class DataLoader:
         return cls(adapter)
     
     @classmethod
-    def from_qmt(
-        cls,
-        db_path: str,
-        account: str = None,
-        password: str = None,
-        start_date: str = '20230101',
-        end_date: str = '',
-        sync_if_empty: bool = True
-    ) -> 'DataLoader':
-        """
-        从QMT数据源创建数据加载器
-
-        Parameters
-        ----------
-        db_path : str
-            数据库文件路径
-        account : str, optional
-            QMT交易账号
-        password : str, optional
-            QMT交易密码
-        start_date : str
-            数据起始日期，格式 'YYYYMMDD'
-        end_date : str
-            数据结束日期，空字符串表示到最新
-        sync_if_empty : bool
-            数据库为空时是否自动同步数据
-
-        Returns
-        -------
-        DataLoader
-            数据加载器实例
-        """
-        if not _check_qmt_available():
-            raise ImportError(
-                "QMT模块不可用。请确保已安装xtquant库，"
-                "并且国金QMT交易端已以极简模式启动。"
-            )
-
-        from .qmt_connector import QMTConnector
-        from .data_sync import DataSynchronizer
-        from ..data.database import DatabaseManager
-        from config.config import get_credentials
-
-        db = DatabaseManager(db_path)
-
-        # 账号密码：参数优先，为空时从config.json读取
-        if not account or not password:
-            creds = get_credentials('qmt')
-            account = account or creds.get('account', '')
-            password = password or creds.get('password', '')
-
-        # 检查是否需要同步数据
-        if sync_if_empty:
-            summary = db.get_data_summary()
-            if summary['stock_daily']['count'] == 0:
-                print("数据库为空，开始从QMT同步数据...")
-                connector = QMTConnector(account=account, password=password)
-                if not connector.is_connected():
-                    connector.connect()
-
-                synchronizer = DataSynchronizer(connector, db)
-                result = synchronizer.sync_all(start_date=start_date, end_date=end_date)
-                print(f"数据同步完成: {result}")
-
-        return cls.from_database(db_path)
-
-    @classmethod
     def from_eastmoney(
         cls,
         token: str = None,
@@ -380,38 +292,25 @@ class DataLoader:
         tuple
             (DataLoader, used_mock_data) - 数据加载器和是否使用了模拟数据
         """
-        from ..config.config import (
-            get_data_mode, 
-            DataMode, 
-            is_test_mode,
-            DATABASE_CONFIG
-        )
-        
-        mode = get_data_mode()
+        from ..config.config import DATABASE_CONFIG
         
         if db_path is None:
             db_path = DATABASE_CONFIG["path"]
         
-        if mode == DataMode.REAL:
-            # 真实模式：只从数据库读取
-            print("[数据加载] 模式: 真实数据 (仅数据库)")
-            return cls.from_database(db_path), False
-        else:
-            # test/auto 模式：优先数据库，为空则回退模拟数据
-            print("[数据加载] 模式: 测试模式 (优先数据库，可回退模拟数据)")
-            try:
-                loader = cls.from_database(db_path)
-                # 检查数据库是否真的有数据
-                stock_list = loader.get_stock_list()
-                if stock_list is not None and not stock_list.empty:
-                    print("[数据加载]   → 从数据库加载成功")
-                    return loader, False
-                else:
-                    print("[数据加载]   → 数据库为空，回退到模拟数据 (CSV)")
-                    return cls.from_test_data(), True
-            except Exception as e:
-                print(f"[数据加载]   → 数据库读取失败 ({e})，回退到模拟数据 (CSV)")
-                return cls.from_test_data(), True
+        # 统一行为：优先从数据库读，数据库为空则报错
+        print("[数据加载] 从数据库加载")
+        try:
+            loader = cls.from_database(db_path)
+            stock_list = loader.get_stock_list()
+            if stock_list is not None and not stock_list.empty:
+                print("[数据加载]   → 从数据库加载成功")
+                return loader, False
+            else:
+                raise ValueError("数据库为空，请先运行 python main.py data sync 同步数据")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"数据库读取失败 ({e})，请先运行 python main.py data sync 同步数据")
     
     def preprocess(self, fill_method: str = 'ffill') -> 'DataLoader':
         """
@@ -536,28 +435,14 @@ class DataLoader:
         Returns
         -------
         dict
-            数据源信息，包含模式、路径等
+            数据源信息，包含路径等
         """
-        from ..config.config import get_data_mode, DataMode
+        from ..config.config import DATABASE_CONFIG
         
-        mode = get_data_mode()
         info = {
-            'mode': mode,
-            'mode_description': {
-                DataMode.TEST: '测试数据 (CSV)',
-                DataMode.REAL: '真实数据 (数据库)',
-                DataMode.AUTO: '自动检测'
-            }.get(mode, mode),
+            'mode': 'database',
+            'db_path': DATABASE_CONFIG["path"],
         }
-        
-        if mode == DataMode.TEST or (mode == DataMode.AUTO and is_test_mode()):
-            from .test_data_generator import get_test_data_path
-            info['stock_info_path'] = str(get_test_data_path('stock_info'))
-            info['stock_daily_path'] = str(get_test_data_path('stock_daily'))
-            info['index_daily_path'] = str(get_test_data_path('index_daily'))
-        else:
-            from ..config.config import DATABASE_CONFIG
-            info['db_path'] = DATABASE_CONFIG["path"]
         
         return info
     
@@ -626,29 +511,3 @@ class DataLoader:
         result.set_index(['trade_date', 'stock_code'], inplace=True)
         
         return result
-
-
-def is_test_mode() -> bool:
-    """
-    判断当前是否使用测试数据模式
-    
-    Returns
-    -------
-    bool
-        是否为测试数据模式
-    """
-    from ..config.config import is_test_mode
-    return is_test_mode()
-
-
-def is_real_mode() -> bool:
-    """
-    判断当前是否使用真实数据模式
-    
-    Returns
-    -------
-    bool
-        是否为真实数据模式
-    """
-    from ..config.config import is_real_mode
-    return is_real_mode()

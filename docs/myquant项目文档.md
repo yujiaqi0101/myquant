@@ -35,9 +35,9 @@ CLI完善后可以让AI灵活调用
 |**系统表**|股票池|||||
 ||股票池成员|||||
 ||数据同步日志|||||
-||交易日列表|||get\_trading\_dates\_by\_year||
+||交易日列表|||get\_trading\_dates\_by\_year（全量同步1991至今，同步第一步）||
 ||暂不开发\-\-\>申万行业||||最新个股申万行业分类\(完整版\-截至7月末\)\.xlsx[最新个股申万行业分类\(完整版\-截至7月末\)\.xlsx](https://my.feishu.cn/file/RhrubufgWoRPlfxhph1chO17nab)|
-||除权除息日|||stk\_get\_dividend||
+||除权除息日|||stk\_get\_dividend（当前账号无接口权限，已暂停同步）||
 |**股票数据**|股票基本信息<br>|||东财 101001:A 股，东财get\_symbol\_infos <br>||
 ||股票日频数据|||history<br>||
 ||暂不开发\-\-\>股票分钟数据|||||

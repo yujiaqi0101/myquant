@@ -2,52 +2,111 @@
 数据同步模块
 ============
 
-负责从QMT下载数据并写入SQLite数据库。
+负责从数据源下载数据并写入SQLite数据库。
 支持全量同步和增量同步，自动计算VWAP，填充停牌数据。
+
+同步流程对齐东财掘金API结构（13步）：
+1.  交易日历 → t_trading_date
+2.  股票基本信息 → t_stock_info
+3.  股票日频数据 → t_stock_daily
+4.  ETF基本信息 → t_etf_info
+5.  ETF日频数据 → t_etf_daily
+6.  指数基本信息 → t_index_info
+7.  指数成分股 → t_stock_in_index
+8.  指数日频数据 → t_index_daily
+9.  板块基本信息 → t_sector_info
+10. 板块成分股 → t_stock_list_in_sector (通达信)
+11. 财务数据 → financial_data
+12. 估值数据 → t_valuation_data
+13. 除权除息 → t_dividend_date
+
+通过 SourceRegistry 按数据类型路由到最佳数据源：
+- 股票/ETF/指数/财务/估值/除权除息 -> 东财掘金（默认）
+- 板块成分股 -> 通达信（默认）
+- 可通过 config/config.json 的 data_source.routing 字段切换
 
 所有表定义统一由 database.py 管理，本模块不创建任何表。
 """
 
 import logging
-import sqlite3
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Callable
 
 import pandas as pd
 import numpy as np
 
-from .qmt_adapter import QMTDataAdapter
-from .inspector import DataInspector
-
 logger = logging.getLogger(__name__)
+
+# 同步步骤总数
+SYNC_TOTAL_STEPS = 13
+
+
+# ============ 统一列名映射 ============
+
+# 东财API返回的标准字段 -> 数据库表字段的映射配置
+COLUMN_MAPPINGS = {
+    'stock_info': {'symbol': 'stock_code', 'sec_name': 'stock_name'},
+    'etf_info': {'symbol': 'etf_code', 'sec_name': 'etf_name'},
+    'index_info': {'symbol': 'index_code', 'sec_name': 'index_name'},
+    'sector_info': {'symbol': 'sector_code', 'sec_name': 'sector_name'},
+    'daily': {'symbol': 'stock_code'},
+    'financial': {'symbol': 'stock_code'},
+    'valuation': {'symbol': 'stock_code'},
+    'dividend': {'symbol': 'stock_code'},
+}
+
+
+def apply_column_mapping(df: pd.DataFrame, mapping_key: str) -> pd.DataFrame:
+    """
+    统一列名映射：将东财API返回字段映射为数据库表字段。
+
+    仅在源列存在且目标列不存在时执行映射，避免覆盖已有列。
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        待映射的DataFrame
+    mapping_key : str
+        映射配置键名，如 'stock_info', 'daily' 等
+
+    Returns
+    -------
+    pd.DataFrame
+        映射后的DataFrame
+    """
+    if df.empty:
+        return df
+
+    col_map = COLUMN_MAPPINGS.get(mapping_key, {})
+    if not col_map:
+        return df
+
+    actual_map = {}
+    for src, dst in col_map.items():
+        if src in df.columns and dst not in df.columns:
+            actual_map[src] = dst
+
+    if actual_map:
+        df = df.rename(columns=actual_map)
+
+    return df
 
 
 class DataSynchronizer:
     """
     数据同步器
 
-    从QMT数据源同步数据到SQLite数据库，支持全量/增量同步，
+    从多数据源同步数据到SQLite数据库，支持全量/增量同步，
     自动计算VWAP，填充停牌数据，批量写入数据库。
+
+    通过 SourceRegistry 按数据类型路由到最佳数据源。
 
     Parameters
     ----------
-    qmt_connector : QMTConnector
-        QMT数据连接器实例，提供以下方法：
-        - get_stock_list_in_sector(sector_name) -> list
-        - get_instrument_detail(stock_code) -> dict
-        - get_market_data_ex(stock_list, period, start_time, end_time, ...) -> dict
-        - get_sector_list() -> list
-        - get_financial_data(stock_list, table_list, start_time, end_time) -> dict
-        - download_history_data(stock_list, period, start_time, end_time)
-        - download_sector_data()
-        - download_financial_data(stock_list, table_list, start_time, end_time)
     db_manager : DatabaseManager
-        数据库管理器实例，提供以下方法：
-        - insert_stock_daily(df) -> int
-        - insert_index_daily(df) -> int
-        - insert_stock_info(df) -> int
-        - insert_qmt_instruments(df) -> int
-        - insert_data_sync_log(...) -> int
+        数据库管理器实例
+    registry : SourceRegistry, optional
+        数据源注册中心，按数据类型路由到最佳数据源
     """
 
     # 已知指数代码列表（用于区分股票和指数）
@@ -57,15 +116,43 @@ class DataSynchronizer:
         '399005.SZ', '399300.SZ', '399673.SZ',
     })
 
-    def __init__(self, qmt_connector, db_manager):
-        self.qmt = qmt_connector
+    def __init__(self, db_manager=None, registry=None):
         self.db = db_manager
 
-    # ============ 公开方法 ============
+        # 创建或使用传入的 registry
+        if registry:
+            self._registry = registry
+        else:
+            from .source_registry import SourceRegistry
+            self._registry = SourceRegistry()
+
+    def _get_source(self, data_type: str):
+        """根据数据类型获取对应的数据源"""
+        source = self._registry.get_source_for_data_type(data_type)
+        if source is None:
+            raise ConnectionError(f"无可用的数据源 (data_type={data_type})")
+        return source
+
+    # ============ 主入口 ============
 
     def sync_all(self, start_date='20230101', end_date='', progress_callback=None) -> dict:
         """
-        全量同步：股票列表 -> 基本信息 -> 行情数据 -> 板块数据 -> 财务数据
+        全量同步，对齐东财掘金API结构
+
+        同步流程（13步）：
+        1.  交易日历 → t_trading_date
+        2.  股票基本信息 → t_stock_info
+        3.  股票日频数据 → t_stock_daily
+        4.  ETF基本信息 → t_etf_info
+        5.  ETF日频数据 → t_etf_daily
+        6.  指数基本信息 → t_index_info
+        7.  指数成分股 → t_stock_in_index
+        8.  指数日频数据 → t_index_daily
+        9.  板块基本信息 → t_sector_info
+        10. 板块成分股 → t_stock_list_in_sector (通达信)
+        11. 财务数据 → financial_data
+        12. 估值数据 → t_valuation_data
+        13. 除权除息 → t_dividend_date
 
         Parameters
         ----------
@@ -89,24 +176,29 @@ class DataSynchronizer:
         results = {
             'start_date': start_date,
             'end_date': end_date,
-            'stock_list': {},
-            'instruments': {},
-            'daily_data': {},
-            'sector_data': {},
-            'financial_data': {},
+            'steps': {},
             'errors': [],
         }
 
         try:
-            # 1. 同步股票列表
-            self._report_progress(progress_callback, 'stock_list', 0, 5, '正在同步股票列表...')
-            stock_list = self.sync_stock_list()
-            results['stock_list'] = {
-                'status': 'success',
-                'count': len(stock_list),
-            }
-            self._report_progress(progress_callback, 'stock_list', 1, 5,
-                                  f'股票列表同步完成，共 {len(stock_list)} 条')
+            # ---- 步骤1: 交易日历 → t_trading_date（全量同步，不受时间范围影响）----
+            step = 1
+            self._report_progress(progress_callback, 'trading_dates', step, SYNC_TOTAL_STEPS,
+                                  '正在同步交易日历（全量）...')
+            r = self.sync_trading_dates()
+            results['steps']['trading_dates'] = r
+            self._report_progress(progress_callback, 'trading_dates', step, SYNC_TOTAL_STEPS,
+                                  f'交易日历同步完成，共 {r.get("count", 0)} 条')
+
+            # ---- 步骤2: 股票基本信息 → t_stock_info ----
+            step = 2
+            self._report_progress(progress_callback, 'stock_info', step, SYNC_TOTAL_STEPS,
+                                  '正在同步股票基本信息...')
+            r = self.sync_stock_info()
+            results['steps']['stock_info'] = r
+            stock_list = r.get('codes', [])
+            self._report_progress(progress_callback, 'stock_info', step, SYNC_TOTAL_STEPS,
+                                  f'股票基本信息同步完成，共 {r.get("count", 0)} 条')
 
             if not stock_list:
                 logger.warning("股票列表为空，跳过后续同步")
@@ -115,52 +207,123 @@ class DataSynchronizer:
                                error_message='股票列表为空')
                 return results
 
-            # 2. 同步合约基本信息
-            self._report_progress(progress_callback, 'instruments', 1, 5, '正在同步合约信息...')
-            instrument_count = self.sync_instruments(stock_list)
-            results['instruments'] = {
-                'status': 'success',
-                'count': instrument_count,
-            }
-            self._report_progress(progress_callback, 'instruments', 2, 5,
-                                  f'合约信息同步完成，共 {instrument_count} 条')
+            # ---- 步骤3: 股票日频数据 → t_stock_daily ----
+            step = 3
+            self._report_progress(progress_callback, 'stock_daily', step, SYNC_TOTAL_STEPS,
+                                  '正在同步股票日频数据...')
+            r = self.sync_stock_daily(stock_list, start_date, end_date, progress_callback)
+            results['steps']['stock_daily'] = r
+            self._report_progress(progress_callback, 'stock_daily', step, SYNC_TOTAL_STEPS,
+                                  f'股票日频数据同步完成，共 {r.get("records", 0)} 条')
 
-            # 3. 同步行情数据
-            self._report_progress(progress_callback, 'daily_data', 2, 5, '正在同步行情数据...')
-            daily_result = self.sync_daily_data(stock_list, start_date, end_date, progress_callback)
-            results['daily_data'] = daily_result
-            self._report_progress(progress_callback, 'daily_data', 3, 5,
-                                  f'行情数据同步完成，股票 {daily_result.get("stock_records", 0)} 条，'
-                                  f'指数 {daily_result.get("index_records", 0)} 条')
+            # ---- 步骤4: ETF基本信息 → t_etf_info ----
+            step = 4
+            self._report_progress(progress_callback, 'etf_info', step, SYNC_TOTAL_STEPS,
+                                  '正在同步ETF基本信息...')
+            r = self.sync_etf_info()
+            results['steps']['etf_info'] = r
+            etf_list = r.get('codes', [])
+            self._report_progress(progress_callback, 'etf_info', step, SYNC_TOTAL_STEPS,
+                                  f'ETF基本信息同步完成，共 {r.get("count", 0)} 条')
 
-            # 4. 同步板块数据
-            self._report_progress(progress_callback, 'sector_data', 3, 5, '正在同步板块数据...')
-            sector_result = self.sync_sector_data()
-            results['sector_data'] = sector_result
-            self._report_progress(progress_callback, 'sector_data', 4, 5,
-                                  f'板块数据同步完成，共 {sector_result.get("sector_count", 0)} 个板块')
+            # ---- 步骤5: ETF日频数据 → t_etf_daily ----
+            step = 5
+            self._report_progress(progress_callback, 'etf_daily', step, SYNC_TOTAL_STEPS,
+                                  '正在同步ETF日频数据...')
+            r = self.sync_etf_daily(etf_list, start_date, end_date, progress_callback)
+            results['steps']['etf_daily'] = r
+            self._report_progress(progress_callback, 'etf_daily', step, SYNC_TOTAL_STEPS,
+                                  f'ETF日频数据同步完成，共 {r.get("records", 0)} 条')
 
-            # 5. 同步财务数据
-            self._report_progress(progress_callback, 'financial_data', 4, 5, '正在同步财务数据...')
-            financial_result = self.sync_financial_data(stock_list, start_date, end_date, progress_callback)
-            results['financial_data'] = financial_result
-            self._report_progress(progress_callback, 'financial_data', 5, 5,
-                                  f'财务数据同步完成，共 {financial_result.get("record_count", 0)} 条')
+            # ---- 步骤6: 指数基本信息 → t_index_info ----
+            step = 6
+            self._report_progress(progress_callback, 'index_info', step, SYNC_TOTAL_STEPS,
+                                  '正在同步指数基本信息...')
+            r = self.sync_index_info()
+            results['steps']['index_info'] = r
+            index_list = r.get('codes', [])
+            self._report_progress(progress_callback, 'index_info', step, SYNC_TOTAL_STEPS,
+                                  f'指数基本信息同步完成，共 {r.get("count", 0)} 条')
 
+            # ---- 步骤7: 指数成分股 → t_stock_in_index ----
+            step = 7
+            self._report_progress(progress_callback, 'index_constituents', step, SYNC_TOTAL_STEPS,
+                                  '正在同步指数成分股...')
+            r = self.sync_index_constituents()
+            results['steps']['index_constituents'] = r
+            self._report_progress(progress_callback, 'index_constituents', step, SYNC_TOTAL_STEPS,
+                                  f'指数成分股同步完成，共 {r.get("count", 0)} 条')
+
+            # ---- 步骤8: 指数日频数据 → t_index_daily ----
+            step = 8
+            self._report_progress(progress_callback, 'index_daily', step, SYNC_TOTAL_STEPS,
+                                  '正在同步指数日频数据...')
+            r = self.sync_index_daily(index_list, start_date, end_date, progress_callback)
+            results['steps']['index_daily'] = r
+            self._report_progress(progress_callback, 'index_daily', step, SYNC_TOTAL_STEPS,
+                                  f'指数日频数据同步完成，共 {r.get("records", 0)} 条')
+
+            # ---- 步骤9: 板块基本信息 → t_sector_info ----
+            step = 9
+            self._report_progress(progress_callback, 'sector_info', step, SYNC_TOTAL_STEPS,
+                                  '正在同步板块基本信息...')
+            r = self.sync_sector_info()
+            results['steps']['sector_info'] = r
+            self._report_progress(progress_callback, 'sector_info', step, SYNC_TOTAL_STEPS,
+                                  f'板块基本信息同步完成，共 {r.get("count", 0)} 条')
+
+            # ---- 步骤10: 板块成分股 → t_stock_list_in_sector (通达信) ----
+            step = 10
+            self._report_progress(progress_callback, 'sector_constituents', step, SYNC_TOTAL_STEPS,
+                                  '正在同步板块成分股...')
+            r = self.sync_sector_constituents()
+            results['steps']['sector_constituents'] = r
+            self._report_progress(progress_callback, 'sector_constituents', step, SYNC_TOTAL_STEPS,
+                                  f'板块成分股同步完成，共 {r.get("count", 0)} 条')
+
+            # ---- 步骤11: 财务数据 → financial_data ----
+            step = 11
+            self._report_progress(progress_callback, 'financial_data', step, SYNC_TOTAL_STEPS,
+                                  '正在同步财务数据...')
+            r = self.sync_financial_data(stock_list, start_date, end_date, progress_callback)
+            results['steps']['financial_data'] = r
+            self._report_progress(progress_callback, 'financial_data', step, SYNC_TOTAL_STEPS,
+                                  f'财务数据同步完成，共 {r.get("count", 0)} 条')
+
+            # ---- 步骤12: 估值数据 → t_valuation_data ----
+            step = 12
+            self._report_progress(progress_callback, 'valuation_data', step, SYNC_TOTAL_STEPS,
+                                  '正在同步估值数据...')
+            r = self.sync_valuation_data(stock_list, end_date)
+            results['steps']['valuation_data'] = r
+            self._report_progress(progress_callback, 'valuation_data', step, SYNC_TOTAL_STEPS,
+                                  f'估值数据同步完成，共 {r.get("count", 0)} 条')
+
+            # ---- 步骤13: 除权除息 → t_dividend_date ----
+            step = 13
+            self._report_progress(progress_callback, 'dividend_data', step, SYNC_TOTAL_STEPS,
+                                  '正在同步除权除息数据...')
+            r = self.sync_dividend_data(stock_list, start_date, end_date)
+            results['steps']['dividend_data'] = r
+            if r.get('status') == 'skipped':
+                self._report_progress(progress_callback, 'dividend_data', step, SYNC_TOTAL_STEPS,
+                                      '除权除息接口无权限，已跳过')
+            else:
+                self._report_progress(progress_callback, 'dividend_data', step, SYNC_TOTAL_STEPS,
+                                      f'除权除息数据同步完成，共 {r.get("count", 0)} 条')
+
+            # 汇总
             end_time = datetime.now()
-            total_records = (
-                results['stock_list'].get('count', 0) +
-                results['instruments'].get('count', 0) +
-                results['daily_data'].get('stock_records', 0) +
-                results['daily_data'].get('index_records', 0) +
-                results['financial_data'].get('record_count', 0)
+            total_records = sum(
+                s.get('count', 0) + s.get('records', 0)
+                for s in results['steps'].values()
+                if isinstance(s, dict)
             )
             self._log_sync('full_sync', start_time, end_time, total_records, 'success',
                            details=f'全量同步完成，耗时 {(end_time - start_time).total_seconds():.1f}s')
             logger.info(f"全量同步完成，耗时 {(end_time - start_time).total_seconds():.1f}s")
 
-            # ==== 同步闭环 (Task 9.4/9.5/9.6) ====
-            # sync_all → inspect → auto_resync，最多 3 轮直到无缺失
+            # 同步后自动 inspect + 补同步闭环
             self._run_sync_inspect_loop(start_date, end_date, results)
 
         except Exception as e:
@@ -169,228 +332,128 @@ class DataSynchronizer:
             self._log_sync('full_sync', start_time, datetime.now(), 0, 'failed',
                            error_message=str(e))
 
-        self._report_progress(progress_callback, 'done', 5, 5, '全量同步完成')
+        self._report_progress(progress_callback, 'done', SYNC_TOTAL_STEPS, SYNC_TOTAL_STEPS,
+                              '全量同步完成')
         return results
 
-    def _run_sync_inspect_loop(
-        self,
-        start_date: str,
-        end_date: str,
-        results: Dict[str, Any],
-        max_rounds: int = 3,
-    ) -> None:
+    # ============ 各步骤同步方法 ============
+
+    def sync_trading_dates(self, start_date: str = None, end_date: str = None) -> dict:
         """
-        同步闭环：sync → inspect → auto_resync，最多 3 轮直到无缺失
+        步骤1: 同步交易日历 → t_trading_date
 
-        Parameters
-        ----------
-        start_date, end_date : str
-            同步起止日期（YYYYMMDD）
-        results : dict
-            sync_all 的 results，循环过程中追加 'inspect' 字段
-        max_rounds : int
-            最大循环轮数（防止无限循环）
-        """
-        inspector = DataInspector(self.db)
-        # 转换日期格式：YYYYMMDD -> YYYY-MM-DD
-        def _fmt(d: str) -> str:
-            if len(d) == 8 and d.isdigit():
-                return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
-            return d
-
-        inspect_results = []
-        for round_idx in range(1, max_rounds + 1):
-            logger.info(f"[sync→inspect→resync] 第 {round_idx}/{max_rounds} 轮检查")
-            inspect_result = inspector.inspect(
-                start_date=_fmt(start_date),
-                end_date=_fmt(end_date),
-                table='stock_daily',
-            )
-            inspect_results.append({
-                'round': round_idx,
-                'total_symbols': inspect_result.get('total_symbols', 0),
-                'missing_count': len(inspect_result.get('missing_symbols', [])),
-                'partial_count': len(inspect_result.get('partial_symbols', [])),
-            })
-
-            # 无缺失，退出循环
-            if (not inspect_result.get('missing_symbols') and
-                    not inspect_result.get('partial_symbols')):
-                logger.info(f"[sync→inspect→resync] 第 {round_idx} 轮无缺失，闭环完成")
-                break
-
-            # 自动补充缺失
-            refetched = self._auto_resync_missing(inspect_result, start_date, end_date)
-            inspect_results[-1]['refetched'] = refetched
-            if refetched == 0:
-                logger.info(f"[sync→inspect→resync] 第 {round_idx} 轮无可补充数据，停止")
-                break
-
-        results['inspect'] = inspect_results
-
-    def _auto_resync_missing(
-        self,
-        inspect_result: Dict[str, Any],
-        start_date: str,
-        end_date: str,
-    ) -> int:
-        """
-        自动补充缺失数据
-
-        Parameters
-        ----------
-        inspect_result : dict
-            DataInspector.inspect() 的返回
-        start_date, end_date : str
-            同步起止日期
+        全量从东财 get_trading_dates_by_year 获取交易日列表（1991年至今），
+        不受 start_date/end_date 时间范围影响，每次同步全量替换。
 
         Returns
         -------
-        int
-            尝试补充的次数
-        """
-        # 取数据库中已有股票列表（不包括完全缺失的，避免对未上市股票反复请求）
-        missing = inspect_result.get('missing_symbols', [])
-        gaps = inspect_result.get('gaps', {})
-        n_attempts = 0
-
-        if missing:
-            logger.info(f"[_auto_resync_missing] {len(missing)} 只股票完全缺失，跳过（不在已上市范围内）")
-        if gaps:
-            # 仅尝试补充"有 partial 数据"的股票
-            partial_symbols = [s for s, _, _ in inspect_result.get('partial_symbols', [])]
-            for s in partial_symbols:
-                sym_gaps = gaps.get(s, [])
-                if not sym_gaps:
-                    continue
-                try:
-                    logger.info(f"[_auto_resync_missing] 补拉 {s}: {len(sym_gaps)} 天")
-                    self.sync_daily_data([s], start_date, end_date)
-                    n_attempts += len(sym_gaps)
-                except Exception as e:
-                    logger.warning(f"[_auto_resync_missing] {s} 补拉失败: {e}")
-        return n_attempts
-
-    def sync_stock_list(self) -> list:
-        """
-        从QMT获取全部A股股票列表
-
-        调用 self.qmt.get_stock_list_in_sector('沪深A股') 获取。
-
-        Returns
-        -------
-        list
-            合约代码列表，如 ['600000.SH', '000001.SZ', ...]
+        dict
+            同步结果 {'count': int, 'status': str}
         """
         start_time = datetime.now()
-        logger.info("开始同步股票列表...")
+        logger.info("开始同步交易日历（全量，1991至今）...")
 
         try:
-            stock_codes = self.qmt.get_stock_list_in_sector('沪深A股')
-            if stock_codes is None or len(stock_codes) == 0:
-                logger.warning("QMT返回的股票列表为空")
-                self._log_sync('stock_list', start_time, datetime.now(), 0, 'success',
-                               details='列表为空')
-                return []
+            source = self._get_source('trading_dates')
+            # 全量同步：从1991年至当前年份，不受时间范围影响
+            start_year = 1991
+            end_year = datetime.now().year
 
-            # get_stock_list_in_sector 返回的是 list[str]，直接使用
-            logger.info(f"股票列表同步完成，共 {len(stock_codes)} 条")
-            self._log_sync('stock_list', start_time, datetime.now(), len(stock_codes), 'success')
-            return stock_codes
+            dates = source.get_trading_dates(start_year=start_year, end_year=end_year)
+            if not dates:
+                logger.warning("交易日历为空")
+                self._log_sync('trading_dates', start_time, datetime.now(), 0, 'success',
+                               details='交易日历为空')
+                return {'count': 0, 'status': 'empty'}
+
+            # 统一日期格式为 YYYY-MM-DD
+            normalized = []
+            for d in dates:
+                d_str = str(d)
+                if len(d_str) == 8 and d_str.isdigit():
+                    d_str = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:8]}"
+                normalized.append(d_str)
+
+            # 写入数据库
+            count = self.db.insert_trading_dates(normalized)
+
+            logger.info(f"交易日历同步完成: {count} 条")
+            self._log_sync('trading_dates', start_time, datetime.now(), count, 'success')
+            return {'count': count, 'status': 'success'}
 
         except Exception as e:
-            logger.error(f"同步股票列表失败: {e}", exc_info=True)
-            self._log_sync('stock_list', start_time, datetime.now(), 0, 'failed',
+            logger.error(f"同步交易日历失败: {e}", exc_info=True)
+            self._log_sync('trading_dates', start_time, datetime.now(), 0, 'failed',
                            error_message=str(e))
-            return []
+            return {'count': 0, 'status': 'failed', 'error': str(e)}
 
-    def sync_instruments(self, stock_list) -> int:
+    def sync_stock_info(self) -> dict:
         """
-        同步合约基本信息到 stock_info 表和 qmt_instrument 表
+        步骤2: 同步股票基本信息 → t_stock_info
 
-        对每只股票调用 self.qmt.get_instrument_detail(code) 获取详情，
-        然后通过 QMTDataAdapter.transform_instrument_detail() 转换格式，
-        最后调用 self.db.insert_stock_info() 和 self.db.insert_qmt_instruments() 写入。
-
-        Parameters
-        ----------
-        stock_list : list
-            合约代码列表
+        从东财 get_symbol_infos(sec_type1=1010, sec_type2=101001) 获取A股列表及基本信息，
+        一步到位写入 t_stock_info 表，同时返回代码列表供后续步骤使用。
 
         Returns
         -------
-        int
-            同步成功的合约数量
+        dict
+            同步结果 {'count': int, 'codes': list, 'status': str}
         """
         start_time = datetime.now()
-        logger.info(f"开始同步合约信息，共 {len(stock_list)} 条...")
+        logger.info("开始同步股票基本信息...")
 
-        stock_info_rows = []
-        qmt_instrument_rows = []
-        success_count = 0
-        error_count = 0
+        try:
+            source = self._get_source('stock_info')
+            df = source.get_stock_list()
 
-        for i, code in enumerate(stock_list):
-            try:
-                detail = self.qmt.get_instrument_detail(code)
-                if not detail:
-                    error_count += 1
-                    continue
+            if df is None or df.empty:
+                logger.warning("数据源返回的股票列表为空")
+                self._log_sync('stock_info', start_time, datetime.now(), 0, 'success',
+                               details='列表为空')
+                return {'count': 0, 'codes': [], 'status': 'empty'}
 
-                # 使用 QMTDataAdapter 转换为 stock_info 格式
-                stock_info_dict = QMTDataAdapter.transform_instrument_detail(detail, code)
-                stock_info_rows.append(stock_info_dict)
+            # 统一列名映射
+            df = apply_column_mapping(df, 'stock_info')
 
-                # 构建 qmt_instrument 行（使用 QMT 原始字段名映射到 database.py 表字段）
-                qmt_instrument_rows.append({
-                    'stock_code': code,
-                    'instrument_name': detail.get('InstrumentName', ''),
-                    'exchange_id': detail.get('ExchangeID', ''),
-                    'product_type': detail.get('ProductClassification'),
-                    'open_date': self._format_qmt_date(detail.get('OpenDate')),
-                    'pre_close': detail.get('PreClose'),
-                    'up_stop_price': detail.get('UpperLimit'),
-                    'down_stop_price': detail.get('LowerLimit'),
-                    'float_volume': detail.get('FloatVolume'),
-                    'total_volume': detail.get('TotalVolume'),
-                    'price_tick': detail.get('PriceTick'),
-                    'instrument_status': 0,
-                })
+            # stock_code 统一转为内部格式
+            if 'stock_code' in df.columns:
+                from .symbol_converter import SymbolConverter
+                df['stock_code'] = df['stock_code'].apply(
+                    lambda x: SymbolConverter.to_internal(str(x)) if '.' in str(x) else str(x)
+                )
 
-                success_count += 1
+            # 确保必要列存在
+            for col in ['stock_code', 'stock_name']:
+                if col not in df.columns:
+                    logger.warning(f"股票信息缺少必要列: {col}")
+                    self._log_sync('stock_info', start_time, datetime.now(), 0, 'failed',
+                                   error_message=f'缺少列 {col}')
+                    return {'count': 0, 'codes': [], 'status': 'failed'}
 
-            except Exception as e:
-                logger.debug(f"获取合约 {code} 信息失败: {e}")
-                error_count += 1
+            # 写入数据库
+            count = self.db.insert_stock_info(df)
 
-        # 批量写入 stock_info
-        if stock_info_rows:
-            stock_info_df = pd.DataFrame(stock_info_rows)
-            self.db.insert_stock_info(stock_info_df)
+            # 提取代码列表供后续步骤使用
+            codes = df['stock_code'].tolist()
 
-        # 批量写入 qmt_instrument
-        if qmt_instrument_rows:
-            qmt_df = pd.DataFrame(qmt_instrument_rows)
-            self.db.insert_qmt_instruments(qmt_df)
+            logger.info(f"股票基本信息同步完成: {count} 条")
+            self._log_sync('stock_info', start_time, datetime.now(), count, 'success')
+            return {'count': count, 'codes': codes, 'status': 'success'}
 
-        logger.info(f"合约信息同步完成: 成功 {success_count}, 失败 {error_count}")
-        self._log_sync('instruments', start_time, datetime.now(), success_count,
-                       'success' if error_count == 0 else 'partial',
-                       details=f'成功 {success_count}, 失败 {error_count}')
-        return success_count
+        except Exception as e:
+            logger.error(f"同步股票基本信息失败: {e}", exc_info=True)
+            self._log_sync('stock_info', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'count': 0, 'codes': [], 'status': 'failed', 'error': str(e)}
 
-    def sync_daily_data(self, stock_list, start_date, end_date, progress_callback=None) -> dict:
+    def sync_stock_daily(self, stock_list, start_date, end_date, progress_callback=None) -> dict:
         """
-        同步日K线数据到 stock_daily 和 index_daily 表
-
-        使用 self.qmt.get_market_data_ex(stock_list, ...) 批量获取行情数据，
-        通过 QMTDataAdapter.transform_market_data() 转换格式，
-        然后区分股票和指数分别写入。
+        步骤3: 同步股票日频数据 → t_stock_daily
 
         Parameters
         ----------
         stock_list : list
-            合约代码列表
+            股票代码列表
         start_date : str
             开始日期，格式 YYYYMMDD
         end_date : str
@@ -401,215 +464,283 @@ class DataSynchronizer:
         Returns
         -------
         dict
-            同步结果，包含 stock_records, index_records, suspended_count 等
+            同步结果 {'records': int, 'suspended': int, 'status': str}
         """
         start_time = datetime.now()
-        logger.info(f"开始同步行情数据: {start_date} -> {end_date}, 共 {len(stock_list)} 条")
+        logger.info(f"开始同步股票日频数据: {start_date} -> {end_date}, 共 {len(stock_list)} 只")
 
-        # 区分股票和指数
-        stock_codes = []
-        index_codes = []
-        for code in stock_list:
-            if self._is_index_code(code):
-                index_codes.append(code)
-            else:
-                stock_codes.append(code)
-
-        stock_records = 0
-        index_records = 0
-        suspended_count = 0
-
-        # ---- 同步股票日K线 ----
-        if stock_codes:
-            stock_records, stock_suspended = self._sync_stock_daily(
-                stock_codes, start_date, end_date, progress_callback
-            )
-            suspended_count = stock_suspended
-
-        # ---- 同步指数日K线 ----
-        if index_codes:
-            index_records = self._sync_index_daily(
-                index_codes, start_date, end_date, progress_callback,
-                total_stocks=len(stock_codes)  # 用于进度偏移
+        try:
+            stock_records, suspended_count = self._sync_stock_daily(
+                stock_list, start_date, end_date, progress_callback
             )
 
-        result = {
-            'stock_records': stock_records,
-            'index_records': index_records,
-            'suspended_count': suspended_count,
-            'stock_count': len(stock_codes),
-            'index_count': len(index_codes),
-        }
+            logger.info(f"股票日频数据同步完成: {stock_records} 条, 停牌 {suspended_count} 条")
+            self._log_sync('stock_daily', start_time, datetime.now(), stock_records, 'success',
+                           details=f'记录 {stock_records}, 停牌 {suspended_count}')
+            return {
+                'records': stock_records,
+                'suspended': suspended_count,
+                'count': len(stock_list),
+                'status': 'success',
+            }
 
-        logger.info(f"行情数据同步完成: 股票 {stock_records} 条, 指数 {index_records} 条, "
-                     f"停牌 {suspended_count} 条")
-        self._log_sync('daily_data', start_time, datetime.now(),
-                       stock_records + index_records, 'success',
-                       details=f'股票 {stock_records}, 指数 {index_records}, 停牌 {suspended_count}')
-        return result
+        except Exception as e:
+            logger.error(f"同步股票日频数据失败: {e}", exc_info=True)
+            self._log_sync('stock_daily', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'records': 0, 'suspended': 0, 'count': len(stock_list), 'status': 'failed'}
 
-    def sync_index_data(self, start_date: str, end_date: str = '', progress_callback=None) -> int:
+    def sync_etf_info(self) -> dict:
         """
-        单独同步指数日K线数据
+        步骤4: 同步ETF基本信息 → t_etf_info
+
+        从东财 get_symbol_infos(sec_type1=1020, sec_type2=102001) 获取ETF列表及基本信息。
+
+        Returns
+        -------
+        dict
+            同步结果 {'count': int, 'codes': list, 'status': str}
+        """
+        start_time = datetime.now()
+        logger.info("开始同步ETF基本信息...")
+
+        try:
+            source = self._get_source('etf_info')
+            df = source.get_etf_list()
+
+            if df is None or df.empty:
+                logger.warning("数据源返回的ETF列表为空")
+                self._log_sync('etf_info', start_time, datetime.now(), 0, 'success',
+                               details='列表为空')
+                return {'count': 0, 'codes': [], 'status': 'empty'}
+
+            # 统一列名映射
+            df = apply_column_mapping(df, 'etf_info')
+
+            # etf_code 统一转为内部格式
+            if 'etf_code' in df.columns:
+                from .symbol_converter import SymbolConverter
+                df['etf_code'] = df['etf_code'].apply(
+                    lambda x: SymbolConverter.to_internal(str(x)) if '.' in str(x) else str(x)
+                )
+
+            # 写入数据库
+            count = self.db.insert_etf_info(df)
+
+            # 提取代码列表供后续步骤使用
+            codes = df['etf_code'].tolist() if 'etf_code' in df.columns else []
+
+            logger.info(f"ETF基本信息同步完成: {count} 条")
+            self._log_sync('etf_info', start_time, datetime.now(), count, 'success')
+            return {'count': count, 'codes': codes, 'status': 'success'}
+
+        except Exception as e:
+            logger.error(f"同步ETF基本信息失败: {e}", exc_info=True)
+            self._log_sync('etf_info', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'count': 0, 'codes': [], 'status': 'failed', 'error': str(e)}
+
+    def sync_etf_daily(self, etf_list, start_date, end_date, progress_callback=None) -> dict:
+        """
+        步骤5: 同步ETF日频数据 → t_etf_daily
 
         Parameters
         ----------
+        etf_list : list
+            ETF代码列表
         start_date : str
-            起始日期，格式 YYYYMMDD
+            开始日期，格式 YYYYMMDD
         end_date : str
-            结束日期，格式 YYYYMMDD，默认为空表示最新
+            结束日期，格式 YYYYMMDD
         progress_callback : callable, optional
             进度回调函数
 
         Returns
         -------
-        int
-            同步的指数记录数
+        dict
+            同步结果 {'records': int, 'status': str}
         """
         start_time = datetime.now()
-        logger.info(f"开始同步指数数据: {start_date} -> {end_date or '最新'}")
 
-        # 获取指数列表
-        index_codes = self.qmt.get_index_list()
-        if not index_codes:
-            logger.warning("指数列表为空")
-            return 0
+        if not etf_list:
+            logger.info("ETF列表为空，跳过ETF日频数据同步")
+            return {'records': 0, 'count': 0, 'status': 'skipped'}
 
-        logger.info(f"获取到 {len(index_codes)} 个指数")
+        logger.info(f"开始同步ETF日频数据: {start_date} -> {end_date}, 共 {len(etf_list)} 只")
 
-        # 先下载指数历史数据
-        logger.info(f"开始下载 {len(index_codes)} 个指数的历史数据...")
         try:
-            self.qmt.download_history_data(index_codes, period='1d',
-                                          start_time=start_date, end_time=end_date)
+            source = self._get_source('etf_daily')
+            etf_records = 0
+            batch_size = 1000
+            total_etfs = len(etf_list)
+
+            for batch_start in range(0, total_etfs, batch_size):
+                batch_codes = etf_list[batch_start:batch_start + batch_size]
+                batch_end = min(batch_start + batch_size, total_etfs)
+
+                try:
+                    all_frames = []
+                    for code in batch_codes:
+                        df = source.get_etf_daily(
+                            symbol=code,
+                            start_date=start_date,
+                            end_date=end_date,
+                            adjust=1,
+                        )
+                        if df is None or df.empty:
+                            continue
+
+                        df = df.copy()
+                        # 统一列名
+                        col_rename = {}
+                        if 'symbol' in df.columns and 'etf_code' not in df.columns:
+                            col_rename['symbol'] = 'etf_code'
+                        if 'eob' in df.columns and 'trade_date' not in df.columns:
+                            col_rename['eob'] = 'trade_date'
+                        if 'trade_time' in df.columns and 'trade_date' not in df.columns:
+                            col_rename['trade_time'] = 'trade_date'
+                        if col_rename:
+                            df = df.rename(columns=col_rename)
+
+                        if 'etf_code' not in df.columns:
+                            df['etf_code'] = code
+                        else:
+                            from .symbol_converter import SymbolConverter
+                            df['etf_code'] = df['etf_code'].apply(
+                                lambda x: SymbolConverter.to_internal(str(x)) if '.' in str(x) else str(x)
+                            )
+
+                        all_frames.append(df)
+
+                    if all_frames:
+                        df = pd.concat(all_frames, ignore_index=True)
+                        self.db.insert_etf_daily(df)
+                        etf_records += len(df)
+
+                except Exception as e:
+                    logger.warning(f"获取ETF行情批次失败 [{batch_start}:{batch_end}]: {e}")
+
+                if progress_callback and total_etfs > 0:
+                    progress_callback('etf_daily', batch_end, total_etfs,
+                                      f'ETF行情: {batch_end}/{total_etfs}')
+
+            logger.info(f"ETF日频数据同步完成: {etf_records} 条")
+            self._log_sync('etf_daily', start_time, datetime.now(), etf_records, 'success')
+            return {'records': etf_records, 'count': len(etf_list), 'status': 'success'}
+
         except Exception as e:
-            logger.warning(f"批量下载指数历史数据失败: {e}")
-        logger.info("指数历史数据下载完成")
+            logger.error(f"同步ETF日频数据失败: {e}", exc_info=True)
+            self._log_sync('etf_daily', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'records': 0, 'count': len(etf_list), 'status': 'failed'}
 
-        # 同步指数数据
-        index_records = self._sync_index_daily(
-            index_codes, start_date, end_date, progress_callback
-        )
-
-        logger.info(f"指数数据同步完成: {index_records} 条, {len(index_codes)} 个指数")
-        self._log_sync('index_daily', start_time, datetime.now(),
-                       index_records, 'success',
-                       details=f'指数 {index_records} 条, {len(index_codes)} 个')
-        return index_records
-
-    def sync_sector_data(self) -> dict:
+    def sync_index_info(self) -> dict:
         """
-        同步板块数据和成分股，以及指数成分股权重
+        步骤6: 同步指数基本信息 → t_index_info
 
-        调用 self.qmt.get_sector_list() 获取板块列表，
-        调用 self.qmt.get_stock_list_in_sector(sector) 获取每个板块的成分股。
-        对已知指数调用 self.qmt.get_index_weight() 获取成分股权重。
+        从东财 get_symbol_infos(sec_type1=1060, sec_type2=106001) 获取指数列表及基本信息。
 
         Returns
         -------
         dict
-            同步结果，包含 sector_count, constituent_count, index_weight_count 等
+            同步结果 {'count': int, 'codes': list, 'status': str}
         """
         start_time = datetime.now()
-        logger.info("开始同步板块数据...")
+        logger.info("开始同步指数基本信息...")
 
         try:
-            sector_list = self.qmt.get_sector_list()
-            if sector_list is None or len(sector_list) == 0:
-                logger.warning("板块列表为空")
-                self._log_sync('sector_data', start_time, datetime.now(), 0, 'success',
-                               details='板块列表为空')
-                return {'sector_count': 0, 'constituent_count': 0, 'index_weight_count': 0}
+            source = self._get_source('index_info')
+            df = source.get_index_list()
 
-            # get_sector_list 返回的是板块名称列表
-            sector_count = len(sector_list)
-            constituent_count = 0
-            sector_constituent_rows = []
+            if df is None or df.empty:
+                logger.warning("数据源返回的指数列表为空")
+                self._log_sync('index_info', start_time, datetime.now(), 0, 'success',
+                               details='列表为空')
+                return {'count': 0, 'codes': [], 'status': 'empty'}
 
-            for sector_name in sector_list:
-                try:
-                    constituents = self.qmt.get_stock_list_in_sector(sector_name)
-                    if constituents and len(constituents) > 0:
-                        for stock_code in constituents:
-                            sector_constituent_rows.append({
-                                'sector_code': sector_name,
-                                'stock_code': stock_code,
-                            })
-                        constituent_count += len(constituents)
-                except Exception as e:
-                    logger.debug(f"获取板块 [{sector_name}] 成分股失败: {e}")
+            # 统一列名映射
+            df = apply_column_mapping(df, 'index_info')
 
-            # 写入板块成分股到 index_constituent 表（weight为0）
-            if sector_constituent_rows:
-                sector_df = pd.DataFrame(sector_constituent_rows)
-                sector_df = sector_df.rename(columns={'sector_code': 'index_code'})
-                sector_df['weight'] = 0.0
-                self.db.insert_index_constituent(sector_df)
-                logger.info(f"写入板块成分股: {len(sector_constituent_rows)} 条")
+            # index_code 统一转为内部格式
+            if 'index_code' in df.columns:
+                from .symbol_converter import SymbolConverter
+                df['index_code'] = df['index_code'].apply(
+                    lambda x: SymbolConverter.to_internal(str(x)) if '.' in str(x) else str(x)
+                )
 
-            # 同步指数成分股权重
-            index_weight_count = 0
+            # 写入数据库
+            count = self.db.insert_index_info(df)
+
+            # 提取代码列表供后续步骤使用
+            codes = df['index_code'].tolist() if 'index_code' in df.columns else []
+
+            logger.info(f"指数基本信息同步完成: {count} 条")
+            self._log_sync('index_info', start_time, datetime.now(), count, 'success')
+            return {'count': count, 'codes': codes, 'status': 'success'}
+
+        except Exception as e:
+            logger.error(f"同步指数基本信息失败: {e}", exc_info=True)
+            self._log_sync('index_info', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'count': 0, 'codes': [], 'status': 'failed', 'error': str(e)}
+
+    def sync_index_constituents(self) -> dict:
+        """
+        步骤7: 同步指数成分股 → t_stock_in_index
+
+        从东财 stk_get_index_constituents 获取已知指数的成分股。
+
+        Returns
+        -------
+        dict
+            同步结果 {'count': int, 'status': str}
+        """
+        start_time = datetime.now()
+        logger.info("开始同步指数成分股...")
+
+        try:
+            source = self._get_source('index_constituents')
             index_constituent_rows = []
-
-            # 先下载指数权重数据
-            try:
-                logger.info(f"开始下载指数权重数据...")
-                self.qmt.download_index_weight(list(self.KNOWN_INDEX_CODES))
-                logger.info("指数权重数据下载完成")
-            except Exception as e:
-                logger.warning(f"下载指数权重数据失败: {e}")
 
             for index_code in self.KNOWN_INDEX_CODES:
                 try:
-                    weight_data = self.qmt.get_index_weight(index_code)
-                    if weight_data and isinstance(weight_data, dict) and len(weight_data) > 0:
-                        for stock_code, weight in weight_data.items():
+                    constituents = source.get_index_constituents(index_code)
+                    if constituents:
+                        for stock_code in constituents:
                             index_constituent_rows.append({
                                 'index_code': index_code,
                                 'stock_code': stock_code,
-                                'weight': float(weight),
+                                'weight': 0.0,
                             })
-                        index_weight_count += len(weight_data)
-                        logger.debug(f"指数 [{index_code}] 成分股 {len(weight_data)} 条")
+                    logger.debug(f"指数 [{index_code}] 成分股 {len(constituents) if constituents else 0} 条")
                 except Exception as e:
-                    logger.debug(f"获取指数 [{index_code}] 权重失败: {e}")
+                    logger.debug(f"获取指数 [{index_code}] 成分股失败: {e}")
 
-            # 批量写入指数成分股权重
+            # 批量写入
+            count = 0
             if index_constituent_rows:
                 index_df = pd.DataFrame(index_constituent_rows)
-                self.db.insert_index_constituent(index_df)
-                logger.info(f"写入指数成分股权重: {len(index_constituent_rows)} 条")
+                count = self.db.insert_index_constituent(index_df)
+                logger.info(f"写入指数成分股: {count} 条")
 
-            result = {
-                'sector_count': sector_count,
-                'constituent_count': constituent_count,
-                'index_weight_count': index_weight_count,
-            }
-
-            logger.info(f"板块数据同步完成: {sector_count} 个板块, {constituent_count} 条成分股, "
-                        f"{index_weight_count} 条指数权重")
-            self._log_sync('sector_data', start_time, datetime.now(),
-                           sector_count + constituent_count + index_weight_count, 'success',
-                           details=f'板块 {sector_count}, 成分股 {constituent_count}, 指数权重 {index_weight_count}')
-            return result
+            logger.info(f"指数成分股同步完成: {count} 条")
+            self._log_sync('index_constituents', start_time, datetime.now(), count, 'success')
+            return {'count': count, 'status': 'success'}
 
         except Exception as e:
-            logger.error(f"同步板块数据失败: {e}", exc_info=True)
-            self._log_sync('sector_data', start_time, datetime.now(), 0, 'failed',
+            logger.error(f"同步指数成分股失败: {e}", exc_info=True)
+            self._log_sync('index_constituents', start_time, datetime.now(), 0, 'failed',
                            error_message=str(e))
-            return {'sector_count': 0, 'constituent_count': 0, 'index_weight_count': 0, 'error': str(e)}
+            return {'count': 0, 'status': 'failed', 'error': str(e)}
 
-    def sync_financial_data(self, stock_list, start_date, end_date, progress_callback=None) -> dict:
+    def sync_index_daily(self, index_list, start_date, end_date, progress_callback=None) -> dict:
         """
-        同步财务数据
-
-        调用 self.qmt.get_financial_data(stock_list, table_list, start, end) 批量获取，
-        通过 QMTDataAdapter.transform_financial_data() 转换格式。
+        步骤8: 同步指数日频数据 → t_index_daily
 
         Parameters
         ----------
-        stock_list : list
-            合约代码列表
+        index_list : list
+            指数代码列表
         start_date : str
             开始日期，格式 YYYYMMDD
         end_date : str
@@ -620,7 +751,182 @@ class DataSynchronizer:
         Returns
         -------
         dict
-            同步结果，包含 record_count 等
+            同步结果 {'records': int, 'status': str}
+        """
+        start_time = datetime.now()
+
+        if not index_list:
+            logger.info("指数列表为空，跳过指数日频数据同步")
+            return {'records': 0, 'count': 0, 'status': 'skipped'}
+
+        logger.info(f"开始同步指数日频数据: {start_date} -> {end_date}, 共 {len(index_list)} 只")
+
+        try:
+            index_records = self._sync_index_daily(
+                index_list, start_date, end_date, progress_callback
+            )
+
+            logger.info(f"指数日频数据同步完成: {index_records} 条")
+            self._log_sync('index_daily', start_time, datetime.now(), index_records, 'success')
+            return {'records': index_records, 'count': len(index_list), 'status': 'success'}
+
+        except Exception as e:
+            logger.error(f"同步指数日频数据失败: {e}", exc_info=True)
+            self._log_sync('index_daily', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'records': 0, 'count': len(index_list), 'status': 'failed'}
+
+    def _run_tdx_sector_script(self) -> dict:
+        """
+        通过 subprocess 调用通达信目录下的板块数据脚本。
+
+        通达信 TQ 接口必须在通达信目录下运行，因此通过远程调用独立脚本获取
+        板块信息和板块成分股数据，脚本直接写入数据库。
+
+        Returns
+        -------
+        dict
+            {'success': bool, 'stdout': str, 'stderr': str}
+        """
+        import subprocess
+        import sys
+
+        script_path = r"D:\new_tdx_mock\PYPlugins\user\tdxtest1.py"
+        logger.info(f"调用通达信板块数据脚本: {script_path}")
+
+        try:
+            result = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 分钟超时
+            )
+            success = result.returncode == 0
+            if not success:
+                logger.error(f"通达信板块脚本执行失败，返回码: {result.returncode}")
+                logger.error(f"stderr: {result.stderr}")
+            else:
+                logger.info(f"通达信板块脚本执行成功")
+                if result.stdout:
+                    # 提取关键输出行
+                    for line in result.stdout.strip().split('\n'):
+                        if any(kw in line for kw in
+                               ['获取到', '共解析', 't_stock_list_in_sector', 't_sector_info', '板块类型分布', '数据插入完成']):
+                            logger.info(f"  {line.strip()}")
+
+            return {
+                'success': success,
+                'stdout': result.stdout,
+                'stderr': result.stderr,
+            }
+        except subprocess.TimeoutExpired:
+            logger.error("通达信板块脚本执行超时（600秒）")
+            return {'success': False, 'stdout': '', 'stderr': 'Timeout expired'}
+        except FileNotFoundError:
+            logger.error(f"通达信板块脚本不存在: {script_path}")
+            return {'success': False, 'stdout': '', 'stderr': f'Script not found: {script_path}'}
+        except Exception as e:
+            logger.error(f"调用通达信板块脚本异常: {e}")
+            return {'success': False, 'stdout': '', 'stderr': str(e)}
+
+    def sync_sector_info(self) -> dict:
+        """
+        步骤9: 同步板块基本信息 → t_sector_info
+
+        通过 subprocess 调用通达信目录下的脚本获取板块信息并写入数据库。
+        通达信 TQ 接口必须在通达信目录下运行，无法在本进程直接调用。
+
+        Returns
+        -------
+        dict
+            同步结果 {'count': int, 'status': str}
+        """
+        start_time = datetime.now()
+        logger.info("开始同步板块基本信息（通过通达信脚本）...")
+
+        try:
+            result = self._run_tdx_sector_script()
+
+            if not result['success']:
+                raise RuntimeError(f"通达信板块脚本执行失败: {result.get('stderr', '')}")
+
+            # 从数据库读取实际写入数量
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM t_sector_info')
+                count = cursor.fetchone()[0]
+
+            logger.info(f"板块基本信息同步完成: {count} 条")
+            self._log_sync('sector_info', start_time, datetime.now(), count, 'success')
+            return {'count': count, 'status': 'success'}
+
+        except Exception as e:
+            logger.error(f"同步板块基本信息失败: {e}", exc_info=True)
+            self._log_sync('sector_info', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'count': 0, 'status': 'failed', 'error': str(e)}
+
+    def sync_sector_constituents(self) -> dict:
+        """
+        步骤10: 同步板块成分股 → t_stock_list_in_sector
+
+        通过 subprocess 调用通达信目录下的脚本获取板块成分股并写入数据库。
+        通达信 TQ 接口必须在通达信目录下运行，无法在本进程直接调用。
+
+        Returns
+        -------
+        dict
+            同步结果 {'count': int, 'sector_count': int, 'status': str}
+        """
+        start_time = datetime.now()
+        logger.info("开始同步板块成分股（通过通达信脚本）...")
+
+        try:
+            result = self._run_tdx_sector_script()
+
+            if not result['success']:
+                raise RuntimeError(f"通达信板块脚本执行失败: {result.get('stderr', '')}")
+
+            # 从数据库读取实际写入数量
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM t_stock_list_in_sector')
+                count = cursor.fetchone()[0]
+                cursor.execute('SELECT COUNT(DISTINCT sector_code) FROM t_stock_list_in_sector')
+                sector_count = cursor.fetchone()[0]
+
+            logger.info(f"板块成分股同步完成: {sector_count} 个板块, {count} 条成分股")
+            self._log_sync('sector_constituents', start_time, datetime.now(), count, 'success',
+                           details=f'板块 {sector_count}, 成分股 {count}')
+            return {'count': count, 'sector_count': sector_count, 'status': 'success'}
+
+        except Exception as e:
+            logger.error(f"同步板块成分股失败: {e}", exc_info=True)
+            self._log_sync('sector_constituents', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'count': 0, 'sector_count': 0, 'status': 'failed', 'error': str(e)}
+
+    def sync_financial_data(self, stock_list, start_date, end_date, progress_callback=None) -> dict:
+        """
+        步骤11: 同步财务数据 → financial_data
+
+        从东财 stk_get_finance_deriv_pt 截面查询获取财务衍生指标。
+
+        Parameters
+        ----------
+        stock_list : list
+            股票代码列表
+        start_date : str
+            开始日期，格式 YYYYMMDD
+        end_date : str
+            结束日期，格式 YYYYMMDD
+        progress_callback : callable, optional
+            进度回调函数
+
+        Returns
+        -------
+        dict
+            同步结果 {'count': int, 'status': str}
         """
         start_time = datetime.now()
         logger.info(f"开始同步财务数据: {start_date} -> {end_date}")
@@ -631,14 +937,17 @@ class DataSynchronizer:
         record_count = 0
         error_count = 0
 
-        # QMT财务报表类型
-        table_list = ['Balance', 'Income', 'CashFlow']
-
-        # 分批处理，每批100只股票
-        batch_size = 100
+        # 分批处理，每批1000只股票
+        batch_size = 1000
         batch_count = (total + batch_size - 1) // batch_size
 
         logger.info(f"财务数据分批处理: {total}只股票, {batch_count}批, 每批{batch_size}只")
+
+        try:
+            source = self._get_source('financial_data')
+        except ConnectionError as e:
+            logger.error(f"财务数据源不可用: {e}")
+            return {'count': 0, 'stock_count': total, 'status': 'failed'}
 
         for batch_idx in range(batch_count):
             batch_start = batch_idx * batch_size
@@ -648,48 +957,16 @@ class DataSynchronizer:
             try:
                 logger.info(f"处理第 {batch_idx + 1}/{batch_count} 批: {len(batch_codes)}只股票")
 
-                # 1. 下载本批财务数据
-                try:
-                    self.qmt.download_financial_data(
-                        batch_codes, table_list, start_date, end_date
-                    )
-                except Exception as e:
-                    logger.warning(f"第 {batch_idx + 1} 批下载失败: {e}")
-                    error_count += len(batch_codes)
-                    continue
-
-                # 2. 获取本批财务数据
-                financial_data = self.qmt.get_financial_data(
-                    batch_codes, table_list, start_date, end_date
+                df = source.get_financial_data(
+                    symbols=batch_codes,
+                    start_date=start_date,
+                    end_date=end_date,
                 )
 
-                if financial_data:
-                    # 3. 转换并写入本批数据
-                    batch_rows = []
-                    for stock_code, stock_tables in financial_data.items():
-                        if not isinstance(stock_tables, dict):
-                            continue
-                        for table_name, table_df in stock_tables.items():
-                            if table_df is None or table_df.empty:
-                                continue
-                            for report_date, row in table_df.iterrows():
-                                row_data = row.to_dict()
-                                row_data = {
-                                    k: (None if (isinstance(v, float) and pd.isna(v)) else v)
-                                    for k, v in row_data.items()
-                                }
-                                batch_rows.append({
-                                    'stock_code': stock_code,
-                                    'report_date': str(report_date),
-                                    'table_name': table_name,
-                                    'data_json': row_data,
-                                })
-
-                    if batch_rows:
-                        financial_df = pd.DataFrame(batch_rows)
-                        self.db.insert_financial_data(financial_df)
-                        record_count += len(batch_rows)
-                        logger.info(f"第 {batch_idx + 1} 批写入 {len(batch_rows)} 条记录")
+                if df is not None and not df.empty:
+                    self.db.insert_financial_data(df)
+                    record_count += len(df)
+                    logger.info(f"第 {batch_idx + 1} 批写入 {len(df)} 条记录")
 
                 if progress_callback:
                     progress_callback('financial_data', batch_end, total,
@@ -699,17 +976,146 @@ class DataSynchronizer:
                 logger.error(f"第 {batch_idx + 1} 批处理失败: {e}")
                 error_count += len(batch_codes)
 
-        result = {
-            'record_count': record_count,
-            'stock_count': total,
-            'error_count': error_count,
-        }
-
+        status = 'success' if error_count == 0 else 'partial'
         logger.info(f"财务数据同步完成: {record_count} 条, 失败 {error_count}")
-        self._log_sync('financial_data', start_time, datetime.now(), record_count,
-                       'success' if error_count == 0 else 'partial',
+        self._log_sync('financial_data', start_time, datetime.now(), record_count, status,
                        details=f'记录 {record_count}, 失败 {error_count}')
-        return result
+        return {'count': record_count, 'stock_count': total, 'error_count': error_count, 'status': status}
+
+    def sync_valuation_data(self, stock_list, end_date: str) -> dict:
+        """
+        步骤12: 同步估值数据 → t_valuation_data
+
+        从东财 stk_get_daily_valuation_pt 截面查询获取估值指标（PB/PE/PS/DY等）。
+
+        Parameters
+        ----------
+        stock_list : list
+            股票代码列表
+        end_date : str
+            结束日期，格式 YYYYMMDD
+
+        Returns
+        -------
+        dict
+            同步结果 {'count': int, 'status': str}
+        """
+        start_time = datetime.now()
+        logger.info(f"开始同步估值数据，截止日期: {end_date}")
+
+        # 只同步股票（非指数）的估值数据
+        stock_codes = [code for code in stock_list if not self._is_index_code(code)]
+        total = len(stock_codes)
+        record_count = 0
+        error_count = 0
+
+        batch_size = 1000
+        batch_count = (total + batch_size - 1) // batch_size
+
+        try:
+            source = self._get_source('valuation_data')
+        except ConnectionError as e:
+            logger.error(f"估值数据源不可用: {e}")
+            return {'count': 0, 'stock_count': total, 'status': 'failed'}
+
+        # 格式化查询日期
+        trade_date = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}" if len(end_date) == 8 else end_date
+
+        for batch_idx in range(batch_count):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, total)
+            batch_codes = stock_codes[batch_start:batch_end]
+
+            try:
+                logger.info(f"估值数据 第 {batch_idx + 1}/{batch_count} 批: {len(batch_codes)}只股票")
+
+                df = source.get_valuation_data(
+                    symbols=batch_codes,
+                    trade_date=trade_date,
+                )
+
+                if df is not None and not df.empty:
+                    # 统一列名映射
+                    df = apply_column_mapping(df, 'daily')
+
+                    # stock_code 统一转为内部格式
+                    if 'stock_code' in df.columns:
+                        from .symbol_converter import SymbolConverter
+                        df['stock_code'] = df['stock_code'].apply(
+                            lambda x: SymbolConverter.to_internal(str(x)) if '.' in str(x) else str(x)
+                        )
+
+                    # 添加 trade_date
+                    if 'trade_date' not in df.columns:
+                        df['trade_date'] = trade_date
+
+                    self.db.insert_valuation_data(df)
+                    record_count += len(df)
+                    logger.info(f"估值数据 第 {batch_idx + 1} 批写入 {len(df)} 条记录")
+
+            except Exception as e:
+                logger.error(f"估值数据 第 {batch_idx + 1} 批处理失败: {e}")
+                error_count += len(batch_codes)
+
+        status = 'success' if error_count == 0 else 'partial'
+        logger.info(f"估值数据同步完成: {record_count} 条, 失败 {error_count}")
+        self._log_sync('valuation_data', start_time, datetime.now(), record_count, status,
+                       details=f'记录 {record_count}, 失败 {error_count}')
+        return {'count': record_count, 'stock_count': total, 'error_count': error_count, 'status': status}
+
+    def sync_dividend_data(self, stock_list: list = None, start_date: str = None,
+                           end_date: str = None) -> dict:
+        """
+        步骤13: 同步除权除息数据 → t_dividend_date
+
+        Parameters
+        ----------
+        stock_list : list, optional
+            股票代码列表
+        start_date : str, optional
+            开始日期
+        end_date : str, optional
+            结束日期
+
+        Returns
+        -------
+        dict
+            同步结果 {'count': int, 'status': str}
+        """
+        start_time = datetime.now()
+        logger.info("开始同步除权除息数据...")
+
+        logger.warning("当前账号无 GetDividend 除权除息接口访问权限，跳过同步")
+        self._log_sync('dividend_data', start_time, datetime.now(), 0, 'skipped',
+                       details='无 GetDividend 接口访问权限')
+        return {'count': 0, 'status': 'skipped', 'reason': '无 GetDividend 接口访问权限'}
+
+        try:
+            source = self._get_source('dividend_data')
+            df = source.get_dividend_data(
+                symbols=stock_list or [],
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            if df is None or df.empty:
+                logger.warning("除权除息数据为空")
+                self._log_sync('dividend_data', start_time, datetime.now(), 0, 'success',
+                               details='数据为空')
+                return {'count': 0, 'status': 'empty'}
+
+            # 写入数据库
+            record_count = self.db.insert_dividend_data(df)
+
+            logger.info(f"除权除息数据同步完成: {record_count} 条")
+            self._log_sync('dividend_data', start_time, datetime.now(), record_count, 'success')
+            return {'count': record_count, 'status': 'success'}
+
+        except Exception as e:
+            logger.error(f"同步除权除息数据失败: {e}")
+            self._log_sync('dividend_data', start_time, datetime.now(), 0, 'failed',
+                           error_message=str(e))
+            return {'count': 0, 'status': 'failed', 'error': str(e)}
 
     # ============ 内部方法 ============
 
@@ -717,8 +1123,8 @@ class DataSynchronizer:
         """
         批量同步股票日K线数据
 
-        先下载历史数据，再使用 get_market_data_ex 批量获取，transform_market_data 转换，
-        计算 VWAP，填充停牌数据，写入 stock_daily 表。
+        通过 SourceRegistry 路由到东财数据源，批量获取行情数据，
+        计算 VWAP，填充停牌数据，写入 t_stock_daily 表。
 
         Returns
         -------
@@ -727,16 +1133,14 @@ class DataSynchronizer:
         """
         stock_records = 0
         suspended_count = 0
-        batch_size = 100  # 每批100只股票
+        batch_size = 1000
         total_stocks = len(stock_codes)
 
-        # 先下载所有股票的历史数据
-        logger.info(f"开始下载 {total_stocks} 只股票的历史数据...")
         try:
-            self.qmt.download_history_data(stock_codes, period='1d', start_time=start_date, end_time=end_date)
-        except Exception as e:
-            logger.warning(f"批量下载历史数据失败: {e}")
-        logger.info("历史数据下载完成")
+            source = self._get_source('stock_daily')
+        except ConnectionError as e:
+            logger.error(f"股票行情数据源不可用: {e}")
+            return 0, 0
 
         for batch_start in range(0, total_stocks, batch_size):
             batch_codes = stock_codes[batch_start:batch_start + batch_size]
@@ -744,48 +1148,69 @@ class DataSynchronizer:
 
             try:
                 # 批量获取行情数据
-                qmt_data = self.qmt.get_market_data_ex(
-                    batch_codes, period='1d',
-                    start_time=start_date, end_time=end_date,
-                    dividend_type='front'
+                batch_data = source.get_stock_daily_batch(
+                    symbols=batch_codes,
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=1,  # 前复权
                 )
 
-                if not qmt_data:
-                    # 进度回调
+                if not batch_data:
                     if progress_callback and total_stocks > 0:
                         progress_callback('daily_data_stock', batch_end, total_stocks,
                                           f'股票行情: {batch_end}/{total_stocks}')
                     continue
 
-                # 使用 QMTDataAdapter 转换格式
-                df = QMTDataAdapter.transform_market_data(qmt_data)
-                if df is None or df.empty:
+                # 合并所有股票的数据
+                all_frames = []
+                for code, code_df in batch_data.items():
+                    if code_df is None or code_df.empty:
+                        continue
+
+                    df = code_df.copy()
+
+                    # 统一列名
+                    col_rename = {}
+                    if 'symbol' in df.columns and 'stock_code' not in df.columns:
+                        col_rename['symbol'] = 'stock_code'
+                    if 'eob' in df.columns and 'trade_date' not in df.columns:
+                        col_rename['eob'] = 'trade_date'
+                    if 'trade_time' in df.columns and 'trade_date' not in df.columns:
+                        col_rename['trade_time'] = 'trade_date'
+                    if 'pre_close' not in df.columns and 'preClose' in df.columns:
+                        col_rename['preClose'] = 'pre_close'
+                    if col_rename:
+                        df = df.rename(columns=col_rename)
+
+                    # 确保有 stock_code 列，统一为内部格式
+                    if 'stock_code' not in df.columns:
+                        df['stock_code'] = code
+                    else:
+                        from .symbol_converter import SymbolConverter
+                        df['stock_code'] = df['stock_code'].apply(
+                            lambda x: SymbolConverter.to_internal(str(x)) if '.' in str(x) else str(x)
+                        )
+
+                    # 计算 VWAP
+                    if 'vwap' not in df.columns:
+                        df['vwap'] = df.apply(
+                            lambda row: self._calculate_vwap(
+                                row.get('amount'), row.get('volume'), row.get('pre_close')
+                            ), axis=1
+                        )
+
+                    # 填充停牌数据
+                    df = self._fill_suspended_data(df, code)
+
+                    all_frames.append(df)
+
+                if not all_frames:
                     if progress_callback and total_stocks > 0:
                         progress_callback('daily_data_stock', batch_end, total_stocks,
                                           f'股票行情: {batch_end}/{total_stocks}')
                     continue
 
-                # 计算VWAP（transform_market_data 已计算，这里做补充处理）
-                if 'vwap' not in df.columns or df['vwap'].isna().all():
-                    df['vwap'] = df.apply(
-                        lambda row: self._calculate_vwap(
-                            row.get('amount'), row.get('volume'), row.get('pre_close')
-                        ), axis=1
-                    )
-                else:
-                    # 对VWAP为空的行（停牌行）用前收盘价填充
-                    mask = df['vwap'].isna() | (df['vwap'] == 0)
-                    if mask.any():
-                        df.loc[mask, 'vwap'] = df.loc[mask, 'pre_close']
-
-                # 填充停牌数据
-                filled_frames = []
-                for code in df['stock_code'].unique():
-                    code_df = df.loc[df['stock_code'] == code].copy()
-                    code_df = self._fill_suspended_data(code_df, code)
-                    filled_frames.append(code_df)
-                if filled_frames:
-                    df = pd.concat(filled_frames, ignore_index=True)
+                df = pd.concat(all_frames, ignore_index=True)
 
                 # 统计停牌数
                 if 'suspend_flag' in df.columns:
@@ -798,7 +1223,7 @@ class DataSynchronizer:
             except Exception as e:
                 logger.warning(f"获取股票行情批次失败 [{batch_start}:{batch_end}]: {e}", exc_info=True)
 
-            # 进度回调（股票部分占70%）
+            # 进度回调
             if progress_callback and total_stocks > 0:
                 progress_callback('daily_data_stock', batch_end, total_stocks,
                                   f'股票行情: {batch_end}/{total_stocks}')
@@ -810,7 +1235,7 @@ class DataSynchronizer:
         """
         批量同步指数日K线数据
 
-        使用 get_market_data_ex 获取，转换格式后写入 index_daily 表。
+        通过 SourceRegistry 路由到东财数据源，获取行情数据后写入 t_index_daily 表。
 
         Returns
         -------
@@ -818,35 +1243,60 @@ class DataSynchronizer:
             指数记录数
         """
         index_records = 0
-        batch_size = 50
+        batch_size = 1000
         total_indices = len(index_codes)
+
+        try:
+            source = self._get_source('index_daily')
+        except ConnectionError as e:
+            logger.error(f"指数行情数据源不可用: {e}")
+            return 0
 
         for batch_start in range(0, total_indices, batch_size):
             batch_codes = index_codes[batch_start:batch_start + batch_size]
             batch_end = min(batch_start + batch_size, total_indices)
 
             try:
-                qmt_data = self.qmt.get_market_data_ex(
-                    batch_codes, period='1d',
-                    start_time=start_date, end_time=end_date,
-                    dividend_type='front'
-                )
+                all_frames = []
+                for code in batch_codes:
+                    df = source.get_index_daily(
+                        symbol=code,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    if df is None or df.empty:
+                        continue
 
-                if not qmt_data:
+                    df = df.copy()
+
+                    # 统一列名
+                    col_rename = {}
+                    if 'symbol' in df.columns and 'index_code' not in df.columns:
+                        col_rename['symbol'] = 'index_code'
+                    if 'eob' in df.columns and 'trade_date' not in df.columns:
+                        col_rename['eob'] = 'trade_date'
+                    if 'trade_time' in df.columns and 'trade_date' not in df.columns:
+                        col_rename['trade_time'] = 'trade_date'
+                    if col_rename:
+                        df = df.rename(columns=col_rename)
+
+                    if 'index_code' not in df.columns:
+                        df['index_code'] = code
+                    else:
+                        from .symbol_converter import SymbolConverter
+                        df['index_code'] = df['index_code'].apply(
+                            lambda x: SymbolConverter.to_internal(str(x)) if '.' in str(x) else str(x)
+                        )
+
+                    all_frames.append(df)
+
+                if not all_frames:
                     if progress_callback and total_indices > 0:
                         progress_callback('daily_data_index', batch_end, total_indices,
                                           f'指数行情: {batch_end}/{total_indices}')
                     continue
 
-                df = QMTDataAdapter.transform_market_data(qmt_data)
-                if df is None or df.empty:
-                    if progress_callback and total_indices > 0:
-                        progress_callback('daily_data_index', batch_end, total_indices,
-                                          f'指数行情: {batch_end}/{total_indices}')
-                    continue
-
-                # 将 stock_code 列重命名为 index_code
-                df = df.rename(columns={'stock_code': 'index_code'})
+                df = pd.concat(all_frames, ignore_index=True)
 
                 # 写入数据库
                 self.db.insert_index_daily(df)
@@ -855,7 +1305,7 @@ class DataSynchronizer:
             except Exception as e:
                 logger.debug(f"获取指数行情批次失败 [{batch_start}:{batch_end}]: {e}")
 
-            # 进度回调（指数部分占30%）
+            # 进度回调
             if progress_callback and total_indices > 0:
                 progress_callback('daily_data_index', batch_end, total_indices,
                                   f'指数行情: {batch_end}/{total_indices}')
@@ -863,25 +1313,8 @@ class DataSynchronizer:
         return index_records
 
     def _calculate_vwap(self, amount, volume, pre_close) -> float:
-        """
-        计算VWAP：amount/volume，停牌时用pre_close
-
-        Parameters
-        ----------
-        amount : float
-            成交额
-        volume : float
-            成交量
-        pre_close : float
-            前收盘价
-
-        Returns
-        -------
-        float
-            VWAP值
-        """
+        """计算VWAP：amount/volume，停牌时用pre_close"""
         if volume is None or volume == 0 or pd.isna(volume):
-            # 停牌或无成交，使用前收盘价
             if pre_close is not None and not pd.isna(pre_close):
                 return float(pre_close)
             return 0.0
@@ -892,31 +1325,13 @@ class DataSynchronizer:
             return 0.0
 
         vwap = float(amount) / float(volume)
-        # VWAP合理性检查：如果计算结果异常（如<=0），使用前收盘价
         if vwap <= 0 and pre_close is not None and not pd.isna(pre_close):
             return float(pre_close)
 
         return vwap
 
     def _fill_suspended_data(self, df, stock_code) -> pd.DataFrame:
-        """
-        填充停牌数据：OHLC用前收盘价，volume=0，suspend_flag=1
-
-        优先使用QMT返回的suspendFlag字段判断停牌（0=正常, 1=停牌, -1=复牌），
-        如果suspendFlag不可用则回退到volume=0判断。
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            原始行情数据
-        stock_code : str
-            股票代码
-
-        Returns
-        -------
-        pd.DataFrame
-            填充停牌后的数据
-        """
+        """填充停牌数据：OHLC用前收盘价，volume=0，suspend_flag=1"""
         if df.empty:
             return df
 
@@ -926,14 +1341,9 @@ class DataSynchronizer:
         if 'pre_close' not in df.columns:
             df['pre_close'] = df['close'].shift(1)
 
-        # 优先使用QMT的suspendFlag字段判断停牌
-        if 'suspend_flag' in df.columns and df['suspend_flag'].notna().any():
-            # QMT suspendFlag: 0=正常, 1=停牌, -1=复牌
-            suspended_mask = df['suspend_flag'].fillna(0).astype(int) == 1
-        else:
-            # 回退：通过volume=0判断停牌
-            volume_series = df['volume'].fillna(0)
-            suspended_mask = volume_series == 0
+        # 通过volume=0判断停牌
+        volume_series = df['volume'].fillna(0)
+        suspended_mask = volume_series == 0
 
         if not suspended_mask.any():
             df['suspend_flag'] = 0
@@ -947,12 +1357,8 @@ class DataSynchronizer:
         df.loc[suspended_mask, 'volume'] = 0
         df.loc[suspended_mask, 'amount'] = 0
 
-        # 标记停牌（保持与原始列类型一致）
-        if 'suspend_flag' in df.columns:
-            original_dtype = df['suspend_flag'].dtype
-        else:
-            original_dtype = 'int64'
-        df['suspend_flag'] = suspended_mask.astype(original_dtype if isinstance(original_dtype, str) else 'int64')
+        # 标记停牌
+        df['suspend_flag'] = suspended_mask.astype('int64')
 
         # 对于停牌且pre_close也为空的情况，尝试用前一天的close填充
         null_pre_close = df['pre_close'].isna() & suspended_mask
@@ -960,7 +1366,6 @@ class DataSynchronizer:
             df['pre_close'] = df['pre_close'].ffill()
             still_null = df['pre_close'].isna() & suspended_mask
             if still_null.any():
-                # 如果第一行就是停牌且没有前收盘价，用后一天的close
                 df.loc[still_null, 'pre_close'] = df['close'].bfill()
                 df.loc[still_null, 'open'] = df.loc[still_null, 'pre_close']
                 df.loc[still_null, 'high'] = df.loc[still_null, 'pre_close']
@@ -971,28 +1376,7 @@ class DataSynchronizer:
 
     def _log_sync(self, sync_type, start_time, end_time, record_count, status,
                   error_message='', details=''):
-        """
-        记录同步日志到 data_sync_log 表
-
-        通过 self.db.insert_data_sync_log() 写入。
-
-        Parameters
-        ----------
-        sync_type : str
-            同步类型，如 'full_sync', 'stock_list', 'daily_data' 等
-        start_time : datetime
-            同步开始时间
-        end_time : datetime
-            同步结束时间
-        record_count : int
-            同步记录数
-        status : str
-            状态，'success', 'failed', 'partial', 'running'
-        error_message : str
-            错误信息
-        details : str
-            详细信息
-        """
+        """记录同步日志到 t_data_sync 表"""
         try:
             self.db.insert_data_sync_log(
                 sync_type=sync_type,
@@ -1014,27 +1398,25 @@ class DataSynchronizer:
             except Exception as e:
                 logger.debug(f"进度回调异常: {e}")
 
+    # ============ 辅助方法 ============
+
     def get_all_index_codes(self) -> set:
-        """
-        从数据库动态获取所有指数/板块代码
+        """获取所有指数代码（硬编码 + 数据库中的指数/板块代码）"""
+        codes = set(self.KNOWN_INDEX_CODES)
 
-        Returns
-        -------
-        set
-            指数代码集合
-        """
-        try:
-            conn = sqlite3.connect(self.db.db_path)
-            cursor = conn.cursor()
-            cursor.execute('SELECT DISTINCT index_code FROM index_constituent')
-            codes = {row[0] for row in cursor.fetchall()}
-            conn.close()
-            return codes
-        except Exception as e:
-            logger.warning(f"从数据库获取指数代码失败: {e}")
-            return set()
+        if self.db:
+            try:
+                with self.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT DISTINCT index_code FROM t_stock_in_index')
+                    for row in cursor.fetchall():
+                        codes.add(row[0])
+            except Exception as e:
+                logger.warning(f"从数据库获取指数代码失败: {e}")
 
-    # 缓存动态指数代码，避免频繁查库
+        return codes
+
+    # 缓存动态指数代码
     _dynamic_index_codes_cache = None
     _dynamic_index_codes_time = None
 
@@ -1058,7 +1440,7 @@ class DataSynchronizer:
 
         优先级：
         1. 硬编码已知指数列表
-        2. 数据库 index_constituent 表中的指数/板块
+        2. 数据库 t_stock_in_index 表中的指数
         3. 399开头（深交所指数）
         """
         if not isinstance(code, str):
@@ -1068,7 +1450,7 @@ class DataSynchronizer:
         if code in self.KNOWN_INDEX_CODES:
             return True
 
-        # 2. 数据库中的指数/板块
+        # 2. 数据库中的指数
         try:
             dynamic_codes = self._get_cached_index_codes()
             if code in dynamic_codes:
@@ -1087,8 +1469,6 @@ class DataSynchronizer:
         """
         获取标的类型
 
-        优先级: 数据库 product_type > 指数判断 > 代码规则
-
         Parameters
         ----------
         stock_code : str
@@ -1097,38 +1477,17 @@ class DataSynchronizer:
         Returns
         -------
         str
-            标的类型: 'stock', 'index', 'etf', 'fund', 'bond', 'future', 'option', 'unknown'
+            标的类型: 'stock', 'index', 'etf', 'fund', 'bond', 'unknown'
         """
         if not isinstance(stock_code, str) or not stock_code:
             return 'unknown'
 
-        # 1. 检查是否为指数（包括板块）
+        # 1. 检查是否为指数
         if self._is_index_code(stock_code):
             return 'index'
 
-        # 2. 从 qmt_instrument 表查询 product_type
-        try:
-            df = self.db.get_qmt_instruments()
-            if not df.empty and 'stock_code' in df.columns and stock_code in df['stock_code'].values:
-                row = df[df['stock_code'] == stock_code].iloc[0]
-                product_type = row.get('product_type')
-                type_map = {
-                    1: 'stock', 2: 'index', 3: 'fund', 4: 'etf',
-                    5: 'bond', 6: 'future', 7: 'option',
-                }
-                result = type_map.get(product_type, 'unknown')
-                if result != 'unknown':
-                    return result
-        except Exception as e:
-            logger.debug(f"从数据库获取标的类型失败 [{stock_code}]: {e}")
-
-        # 3. 回退到代码规则判断
+        # 2. 代码规则判断
         code_part = stock_code.split('.')[0] if '.' in stock_code else stock_code
-        exchange = stock_code.split('.')[1] if '.' in stock_code else ''
-
-        # 期货（上海期货交易所后缀 SF）
-        if exchange == 'SF':
-            return 'future'
 
         # ETF（常见代码前缀）
         if len(code_part) == 6 and code_part.startswith(('51', '15', '16', '58', '59')):
@@ -1144,36 +1503,72 @@ class DataSynchronizer:
 
         return 'stock'
 
-    @staticmethod
-    def _format_qmt_date(value) -> Optional[str]:
-        """
-        格式化QMT返回的日期值
+    # ============ 同步后自动 inspect + 补同步闭环 ============
 
-        QMT的日期可能是毫秒时间戳、字符串或其他格式。
+    def _run_sync_inspect_loop(self, start_date: str, end_date: str, results: dict,
+                                max_rounds: int = 3):
+        """同步后自动检查缺失并补同步，最多 max_rounds 轮"""
+        try:
+            from .inspector import DataInspector
+        except ImportError:
+            logger.warning("DataInspector 不可用，跳过同步后检查")
+            return
 
-        Parameters
-        ----------
-        value
-            日期值
+        inspector = DataInspector(self.db)
 
-        Returns
-        -------
-        str or None
-            格式化后的日期字符串 'YYYY-MM-DD'，或 None
-        """
-        if value is None:
-            return None
+        for round_num in range(1, max_rounds + 1):
+            logger.info(f"同步后检查 第{round_num}轮...")
+            report = inspector.inspect(start_date, end_date)
 
-        if isinstance(value, (int, float)):
+            # 收集所有缺失的代码
+            all_missing = set()
+            for data_type, details in report.items():
+                missing_codes = details.get('missing_codes', [])
+                if missing_codes:
+                    all_missing.update(missing_codes)
+                    logger.info(f"  {data_type}: {len(missing_codes)} 个代码存在缺失")
+
+            if not all_missing:
+                logger.info(f"同步后检查 第{round_num}轮: 数据完整，无缺失")
+                results['inspect_report'] = report
+                break
+
+            logger.info(f"同步后检查 第{round_num}轮: 发现 {len(all_missing)} 个代码缺失，尝试补同步...")
+
             try:
-                return pd.to_datetime(value, unit='ms').strftime('%Y-%m-%d')
-            except (ValueError, OSError):
-                return str(value)
+                missing_list = list(all_missing)
+                # 区分股票和指数
+                stock_codes = [c for c in missing_list if not self._is_index_code(c)]
+                index_codes = [c for c in missing_list if self._is_index_code(c)]
 
-        if isinstance(value, str):
-            try:
-                return pd.to_datetime(value).strftime('%Y-%m-%d')
-            except (ValueError, TypeError):
-                return value
+                if stock_codes:
+                    stock_records, _ = self._sync_stock_daily(
+                        stock_codes, start_date, end_date, None
+                    )
+                    results.setdefault('resync_rounds', []).append({
+                        'round': round_num,
+                        'type': 'stock',
+                        'missing_count': len(stock_codes),
+                        'resync_records': stock_records,
+                    })
 
-        return None
+                if index_codes:
+                    index_records = self._sync_index_daily(
+                        index_codes, start_date, end_date, None
+                    )
+                    results.setdefault('resync_rounds', []).append({
+                        'round': round_num,
+                        'type': 'index',
+                        'missing_count': len(index_codes),
+                        'resync_records': index_records,
+                    })
+
+            except Exception as e:
+                logger.error(f"补同步失败: {e}")
+                results['inspect_report'] = report
+                break
+        else:
+            logger.warning(f"同步后检查: 已达最大轮次 {max_rounds}，仍有缺失")
+            results['inspect_report'] = report
+
+

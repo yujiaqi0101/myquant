@@ -1,53 +1,15 @@
 """
-quantlab_adapters — myquant ↔ quantlab 适配层。
+QuantLab 适配器模块
+==================
 
-Phase 4: 引擎切换基础设施。
-    - DataAdapter   myquant MultiIndex DataFrame → quantlab Dict[symbol, DataFrame]
-    - ResultAdapter quantlab BacktestResult → myquant BacktestResult
-    - registry      SignalStrategy 自己的策略注册表（v2 策略）
-
-Phase 6: 实验跟踪桥接。
-    - tracker_adapter  MyquantTracker 把 quantlab 实验写入 myquant aquant.db
+提供策略元数据管理、最佳表现自动提炼等功能。
 """
 
-from .data_adapter import (
-    to_quantlab_dict,
-    from_quantlab_db,
-)
-from .result_adapter import (
-    to_myquant_result,
-)
-from .strategy_registry import (
-    SignalStrategyRegistry,
-    register_signal_strategy,
-    discover_v2_strategies,
-)
-from .tracker_adapter import (
-    MyquantTracker,
-)
-from .best_perf_updater import (
-    update_strategy_best_perf,
-    rebuild_all_best_perf,
-    list_missing_best_perf,
-    ensure_best_perf_fresh,
-)
+from .data_adapter import from_quantlab_db, to_quantlab_dict
+from .strategy_registry import SignalStrategyRegistry, discover_v2_strategies
+from .best_perf_updater import BestPerfUpdater, ensure_best_perf_fresh
+from .result_adapter import to_myquant_result
+from .tracker_adapter import MyquantTracker
 
-
-__all__ = [
-    # DataAdapter
-    "to_quantlab_dict",
-    "from_quantlab_db",
-    # ResultAdapter
-    "to_myquant_result",
-    # SignalStrategy 注册表
-    "SignalStrategyRegistry",
-    "register_signal_strategy",
-    "discover_v2_strategies",
-    # Phase 6 桥接
-    "MyquantTracker",
-    # Phase 7 best_perf
-    "update_strategy_best_perf",
-    "rebuild_all_best_perf",
-    "list_missing_best_perf",
-    "ensure_best_perf_fresh",
-]
+# 兼容旧测试中的 register_signal_strategy 导入
+register_signal_strategy = SignalStrategyRegistry.register

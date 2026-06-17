@@ -53,7 +53,7 @@ class HTMLReporter:
             if db_path.exists():
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.cursor()
-                cursor.execute("SELECT stock_code, stock_name FROM stock_info")
+                cursor.execute("SELECT stock_code, stock_name FROM t_stock_info")
                 for row in cursor.fetchall():
                     stock_names[row[0]] = row[1]
                 conn.close()

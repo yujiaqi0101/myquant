@@ -576,7 +576,7 @@ class ValuationCalculator:
                 with self.db_manager.get_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute(
-                        "SELECT industry FROM stock_info WHERE code = ?",
+                        "SELECT industry FROM t_stock_info WHERE code = ?",
                         (stock_code,)
                     )
                     row = cursor.fetchone()
@@ -654,7 +654,7 @@ class ValuationCalculator:
 
             # 查询股本数据
             shares_sql = """
-                SELECT total_shares FROM stock_info WHERE code = ?
+                SELECT total_shares FROM t_stock_info WHERE code = ?
             """
             with self.db_manager.get_connection() as conn:
                 cursor = conn.cursor()
@@ -736,7 +736,7 @@ class ValuationCalculator:
             # 查询最新股价
             price_sql = """
                 SELECT close_price, total_shares
-                FROM stock_daily
+                FROM t_stock_daily
                 WHERE stock_code = ?
                 ORDER BY trade_date DESC
                 LIMIT 1

@@ -288,6 +288,9 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         help='报告名称（默认自动生成）'
     )
 
+    # 数据源参数（已移除 --data-source，数据源统一从 config.json 读取）
+    # 数据源通过 config/config.json 的 data_source.routing 字段按数据类型路由
+
     # ===== Phase 4 新增：quantlab 引擎选择 =====
     parser.add_argument(
         '--engine',
@@ -857,7 +860,26 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
     if args.stocks:
         stock_codes = [s.strip() for s in args.stocks.split(",")]
 
-    # 4) 加载数据（含预热期，与 v1 对齐）
+    # 4) 回测前数据完整性检查
+    from src.data.inspector import DataInspector
+    inspector = DataInspector(_get_db_path())
+    inspect_report = inspector.inspect(
+        start_date=args.start_date,
+        end_date=args.end_date,
+        data_types=['stock_daily'],
+    )
+    for dtype, detail in inspect_report.items():
+        if detail.get('status') == 'warning':
+            missing_codes = list(detail.get('details', {}).keys())
+            if len(missing_codes) > 0:
+                print(f"[数据检查] {dtype}: {len(missing_codes)} 只股票数据缺失超过10%")
+                if len(missing_codes) <= 10:
+                    print(f"  缺失股票: {', '.join(missing_codes)}")
+                else:
+                    print(f"  缺失股票(前10): {', '.join(missing_codes[:10])}...")
+                print(f"  建议: 运行 python main.py data sync 补同步")
+
+    # 5) 加载数据（含预热期，与 v1 对齐）
     from datetime import timedelta
     import time
 

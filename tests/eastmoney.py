@@ -25,8 +25,13 @@ set_token(token)
 # df = get_symbol_infos(sec_type1=1020,sec_type2=102001, symbols='SHSE.512130', df=True)
 # df.to_csv(r'd:\python_workspace\myquant\tests\SHSE.512130.csv', index=False)
 
-df=history(symbol='SHSE.000016', frequency='1d', start_time='2026-01-01',  end_time='2026-07-30', fields='open, close, low, high, eob', adjust=ADJUST_PREV,adjust_end_time='2017-07-30', df= True)
-df.to_csv(r'd:\python_workspace\myquant\tests\SHSE.000016.csv', index=False)
+# df=history(symbol='SHSE.000016', frequency='1d', start_time='2026-01-01',  end_time='2026-07-30', fields='open, close, low, high, eob', adjust=ADJUST_PREV,adjust_end_time='2017-07-30', df= True)
+# df.to_csv(r'd:\python_workspace\myquant\tests\SHSE.000016.csv', index=False)
+# df = get_symbol_infos(sec_type1=1070,sec_type2=107001, df=True)
+# df.to_csv(r'd:\python_workspace\myquant\tests\107001.csv', index=False)
+
+df = stk_get_finance_prime(symbol='SHSE.600000', fields='eps_basic,eps_dil,eps_basic_cut,eps_dil_cut,net_cf_oper_ps,bps_pcom_ps,ttl_ast,ttl_liab,share_cptl,ttl_inc_oper',rpt_type=None, data_type=None,start_date=None, end_date=None, df=True)
+df.to_csv(r'd:\python_workspace\myquant\tests\SHSE.600000finance.csv', index=False)
 
 
 print('done')

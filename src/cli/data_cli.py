@@ -5,62 +5,38 @@
 支持交互式和命令式两种使用方式：
 - 交互式: python main.py data
 - 命令式: python main.py data sync
-
-数据源在 config.json 中按数据类型配置（CLI 不再提供数据源切换参数）
 """
 
 import argparse
 from typing import Optional
 
-from .interactive import InteractiveMenu, prompt_input, prompt_choice, prompt_confirm
+from .interactive import InteractiveMenu, prompt_input, prompt_confirm
 
 
 def _run_data_sync(start_date: str = None, end_date: str = None):
-    """执行数据同步（数据源从 config.json 读取）"""
+    """执行数据同步（通过 SourceRegistry 自动路由数据源）"""
     start_date = start_date or prompt_input("起始日期", "20230101")
     end_date = end_date or prompt_input("结束日期", "")
 
     print(f"\n开始同步数据: {start_date} ~ {end_date or '最新'}")
 
     try:
-        from src.data.data_sync import DataSynchronizer
         from src.data.database import DatabaseManager
-        from src.data.qmt_connector import QMTConnector
+        from src.data.data_sync import DataSynchronizer
         from config.config import DATABASE_CONFIG
 
-        db = DatabaseManager(DATABASE_CONFIG.get('path'))
+        db_path = DATABASE_CONFIG.get('path')
+        db = DatabaseManager(db_path)
+        sync = DataSynchronizer(db)
 
-        # 连接QMT（主数据源：股票日线）
-        print("正在连接QMT...")
-        connector = QMTConnector()
-        if not connector.is_connected():
-            connector.connect()
-
-        if not connector.is_connected():
-            print("QMT连接失败，尝试从数据库读取已有数据")
-            print("✓ 数据同步完成（仅检查数据库现有数据）")
-            return
-
-        print("QMT连接成功")
-
-        synchronizer = DataSynchronizer(connector, db)
-
-        def progress_cb(stage, current, total, message):
-            if total > 0:
-                pct = current / total * 100
-                print(f"  [{stage}] {pct:.1f}% ({current}/{total}) {message}")
+        def progress_cb(step, current, total, msg=''):
+            if msg:
+                print(f"  [{step}] {current}/{total} - {msg}")
             else:
-                print(f"  [{stage}] {message}")
+                print(f"  [{step}] {current}/{total}")
 
-        result = synchronizer.sync_all(
-            start_date=start_date,
-            end_date=end_date,
-            progress_callback=progress_cb
-        )
-
-        print(f"\n同步完成:")
-        for key, val in result.items():
-            print(f"  {key}: {val}")
+        sync.sync_all(start_date=start_date, end_date=end_date, progress_callback=progress_cb)
+        print("\n✓ 数据同步完成")
     except Exception as e:
         print(f"同步失败: {e}")
 
@@ -78,20 +54,6 @@ def _run_data_validate():
         print(f"校验失败: {e}")
 
 
-def _run_generate_test_data(n_stocks: int = 100, n_days: int = 250):
-    """生成测试数据"""
-    try:
-        from src.data.test_data_generator import TestDataGenerator
-
-        generator = TestDataGenerator()
-        data = generator.generate_all_test_data(n_stocks=n_stocks, n_days=n_days)
-        print(f"\n✓ 测试数据已生成")
-        print(f"  股票信息: {len(data['stock_info'])} 条")
-        print(f"  股票日频: {len(data['stock_daily'])} 条")
-    except Exception as e:
-        print(f"生成失败: {e}")
-
-
 def _run_data_status():
     """查看数据概览"""
     try:
@@ -105,28 +67,41 @@ def _run_data_status():
         print(f"{'=' * 50}")
         print(f"  数据库: {DATABASE_CONFIG.get('path')}")
 
-        # 股票信息
-        info = db.get_stock_info()
-        print(f"  股票信息: {len(info)} 条")
+        # 通用查询：统计各同步表记录数
+        sync_tables = [
+            ('t_trading_date', '交易日历'),
+            ('t_stock_info', '股票基本信息'),
+            ('t_stock_daily', '股票日频数据'),
+            ('t_etf_info', 'ETF基本信息'),
+            ('t_etf_daily', 'ETF日频数据'),
+            ('t_index_info', '指数基本信息'),
+            ('t_stock_in_index', '指数成分股'),
+            ('t_index_daily', '指数日频数据'),
+            ('t_sector_info', '板块基本信息'),
+            ('t_stock_list_in_sector', '板块成分股'),
+            ('financial_data', '财务数据'),
+            ('t_valuation_data', '估值数据'),
+            ('t_dividend_date', '除权除息'),
+        ]
 
-        # 日线数据
-        try:
-            daily = db.get_stock_daily(start_date='2020-01-01', end_date='2030-12-31')
-            if not daily.empty:
-                dates = daily['trade_date'].unique()
-                print(f"  日线数据: {len(daily)} 条 ({dates.min()} ~ {dates.max()})")
-            else:
-                print("  日线数据: 无")
-        except Exception:
-            print("  日线数据: 无")
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            for table_name, display_name in sync_tables:
+                try:
+                    cursor.execute(f'SELECT COUNT(*) as cnt FROM {table_name}')
+                    cnt = cursor.fetchone()['cnt']
+                    print(f"  {display_name} ({table_name}): {cnt} 条")
+                except Exception:
+                    print(f"  {display_name} ({table_name}): 表不存在")
 
         # 股票池
         try:
             pools = db.list_stock_pools()
-            print(f"  股票池: {len(pools)} 个")
-            for pool in pools:
-                members = db.get_stock_pool_members(pool['pool_name'])
-                print(f"    - {pool['pool_name']}: {len(members)} 只")
+            if pools:
+                print(f"  股票池: {len(pools)} 个")
+                for pool in pools:
+                    members = db.get_stock_pool_members(pool['pool_name'])
+                    print(f"    - {pool['pool_name']}: {len(members)} 只")
         except Exception:
             pass
 
@@ -164,9 +139,8 @@ def run_data_interactive():
     menu = InteractiveMenu("数据管理")
     menu.add_option('1', '同步数据', lambda: _run_data_sync())
     menu.add_option('2', '校验数据完整性', _run_data_validate)
-    menu.add_option('3', '生成测试数据', lambda: _run_generate_test_data())
-    menu.add_option('4', '查看数据概览', _run_data_status)
-    menu.add_option('5', '清空数据', _run_data_clear)
+    menu.add_option('3', '查看数据概览', _run_data_status)
+    menu.add_option('4', '清空数据', _run_data_clear)
     menu.run()
 
 
@@ -177,17 +151,12 @@ def setup_data_parser(parser: argparse.ArgumentParser) -> None:
     subparsers = parser.add_subparsers(dest='data_command', help='数据管理子命令')
 
     # sync 子命令
-    sync_parser = subparsers.add_parser('sync', help='同步数据（数据源从 config.json 读取）')
+    sync_parser = subparsers.add_parser('sync', help='同步数据')
     sync_parser.add_argument('--start-date', help='起始日期 (YYYYMMDD)')
     sync_parser.add_argument('--end-date', help='结束日期 (YYYYMMDD)')
 
     # validate 子命令
     subparsers.add_parser('validate', help='校验数据完整性')
-
-    # generate-test 子命令
-    gen_parser = subparsers.add_parser('generate-test', help='生成测试数据')
-    gen_parser.add_argument('--n-stocks', type=int, default=100, help='股票数量')
-    gen_parser.add_argument('--n-days', type=int, default=250, help='天数')
 
     # status 子命令
     subparsers.add_parser('status', help='查看数据概览')
@@ -204,11 +173,9 @@ def run_data_command(args) -> None:
 
     cmd = args.data_command
     if cmd == 'sync':
-        _run_data_sync(args.start_date, args.end_date)
+        _run_data_sync(start_date=args.start_date, end_date=args.end_date)
     elif cmd == 'validate':
         _run_data_validate()
-    elif cmd == 'generate-test':
-        _run_generate_test_data(args.n_stocks, args.n_days)
     elif cmd == 'status':
         _run_data_status()
     elif cmd == 'clear':

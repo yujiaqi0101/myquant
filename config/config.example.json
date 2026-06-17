@@ -1,25 +1,8 @@
 {
   "data_source": {
-    "stock_daily": "qmt",
-    "stock_info": "eastmoney",
-    "etf_info": "eastmoney",
-    "etf_daily": "eastmoney",
-    "index_info": "eastmoney",
-    "index_constituents": "eastmoney",
-    "index_daily": "eastmoney",
-    "sector_info": "eastmoney",
-    "sector_constituents": "tdx",
-    "financial_data": "eastmoney",
-    "valuation_data": "eastmoney",
-    "trading_dates": "eastmoney",
-    "dividend": "eastmoney"
+    "source": "database"
   },
   "credentials": {
-    "qmt": {
-      "account": "your_account",
-      "password": "your_password",
-      "path": "E:\\国金QMT交易端模拟\\userdata_mini"
-    },
     "eastmoney": {
       "token": "your_token"
     }

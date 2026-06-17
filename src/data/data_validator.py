@@ -47,7 +47,7 @@ class DataValidator:
             完整性报告，包含以下字段：
             - stock_data: 股票数据检查结果
             - index_data: 指数数据检查结果
-            - stock_info: 股票信息检查结果
+            - t_stock_info: 股票信息检查结果
             - suspended: 停牌数据统计
             - missing_dates: 缺失交易日统计
             - anomalies: 数据异常统计
@@ -62,7 +62,7 @@ class DataValidator:
             'end_date': end_date,
             'stock_data': {},
             'index_data': {},
-            'stock_info': {},
+            't_stock_info': {},
             'suspended': {},
             'missing_dates': {},
             'anomalies': {},
@@ -75,7 +75,7 @@ class DataValidator:
         report['index_data'] = self._check_index_data(start_date, end_date)
 
         # 3. 检查股票信息
-        report['stock_info'] = self._check_stock_info()
+        report['stock_info'] = self._check_t_stock_info()
 
         # 4. 检查停牌数据
         suspended_stocks = self.find_suspended_stocks(start_date, end_date)
@@ -133,7 +133,7 @@ class DataValidator:
         with self.db.get_connection() as conn:
             df = pd.read_sql_query('''
                 SELECT trade_date, volume, close, open, high, low
-                FROM stock_daily
+                FROM t_stock_daily
                 WHERE stock_code = ? AND trade_date BETWEEN ? AND ?
                 ORDER BY trade_date
             ''', conn, params=[stock_code, start_date, end_date])
@@ -209,7 +209,7 @@ class DataValidator:
             # 找出在日期范围内有停牌记录的股票
             df = pd.read_sql_query('''
                 SELECT stock_code, trade_date, volume
-                FROM stock_daily
+                FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
                 ORDER BY stock_code, trade_date
             ''', conn, params=[start_date, end_date])
@@ -263,7 +263,7 @@ class DataValidator:
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT DISTINCT trade_date FROM stock_daily
+                SELECT DISTINCT trade_date FROM t_stock_daily
                 WHERE stock_code = ? AND trade_date BETWEEN ? AND ?
                 ORDER BY trade_date
             ''', (stock_code, start_date, end_date))
@@ -300,7 +300,7 @@ class DataValidator:
                         ELSE '其他'
                     END as exchange,
                     COUNT(DISTINCT stock_code) as count
-                FROM stock_info
+                FROM t_stock_info
                 GROUP BY exchange
             ''')
             summary['stocks_by_exchange'] = {
@@ -310,7 +310,7 @@ class DataValidator:
             # 行业分布
             cursor.execute('''
                 SELECT industry, COUNT(*) as count
-                FROM stock_info
+                FROM t_stock_info
                 WHERE industry IS NOT NULL AND industry != ''
                 GROUP BY industry
                 ORDER BY count DESC
@@ -323,7 +323,7 @@ class DataValidator:
             # 最近同步日志
             cursor.execute('''
                 SELECT sync_type, start_time, end_time, record_count, status
-                FROM data_sync_log
+                FROM t_data_sync
                 ORDER BY id DESC
                 LIMIT 10
             ''')
@@ -342,7 +342,7 @@ class DataValidator:
             cursor.execute('''
                 SELECT trade_date, COUNT(DISTINCT stock_code) as stock_count,
                        COUNT(*) as record_count
-                FROM stock_daily
+                FROM t_stock_daily
                 WHERE trade_date >= date('now', '-30 days')
                 GROUP BY trade_date
                 ORDER BY trade_date DESC
@@ -505,7 +505,7 @@ class DataValidator:
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT DISTINCT trade_date FROM stock_daily
+                SELECT DISTINCT trade_date FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
                 ORDER BY trade_date
             ''', (start_date, end_date))
@@ -523,7 +523,7 @@ class DataValidator:
                     COUNT(DISTINCT trade_date) as trade_date_count,
                     MIN(trade_date) as first_date,
                     MAX(trade_date) as last_date
-                FROM stock_daily
+                FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
             ''', (start_date, end_date))
             row = cursor.fetchone()
@@ -536,7 +536,7 @@ class DataValidator:
             # 检查数据稀疏度：找出交易日数少于50%的股票
             cursor.execute('''
                 SELECT stock_code, COUNT(DISTINCT trade_date) as days
-                FROM stock_daily
+                FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
                 GROUP BY stock_code
                 HAVING days < ?
@@ -568,7 +568,7 @@ class DataValidator:
                     COUNT(DISTINCT trade_date) as trade_date_count,
                     MIN(trade_date) as first_date,
                     MAX(trade_date) as last_date
-                FROM index_daily
+                FROM t_index_daily
                 WHERE trade_date BETWEEN ? AND ?
             ''', (start_date, end_date))
             row = cursor.fetchone()
@@ -581,16 +581,16 @@ class DataValidator:
             'last_date': row['last_date'],
         }
 
-    def _check_stock_info(self) -> dict:
+    def _check_t_stock_info(self) -> dict:
         """检查股票基本信息"""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute('SELECT COUNT(*) as cnt FROM stock_info')
+            cursor.execute('SELECT COUNT(*) as cnt FROM t_stock_info')
             total = cursor.fetchone()['cnt']
 
             cursor.execute('''
-                SELECT COUNT(*) as cnt FROM stock_info
+                SELECT COUNT(*) as cnt FROM t_stock_info
                 WHERE industry IS NOT NULL AND industry != ''
             ''')
             with_industry = cursor.fetchone()['cnt']
@@ -619,7 +619,7 @@ class DataValidator:
             # 获取每日股票数量
             cursor.execute('''
                 SELECT trade_date, COUNT(DISTINCT stock_code) as stock_count
-                FROM stock_daily
+                FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
                 GROUP BY trade_date
                 ORDER BY trade_date
@@ -652,7 +652,7 @@ class DataValidator:
 
             # 负价格记录
             cursor.execute('''
-                SELECT COUNT(*) as cnt FROM stock_daily
+                SELECT COUNT(*) as cnt FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
                 AND (open < 0 OR high < 0 OR low < 0 OR close < 0)
             ''', (start_date, end_date))
@@ -660,7 +660,7 @@ class DataValidator:
 
             # 成交量异常（负数）
             cursor.execute('''
-                SELECT COUNT(*) as cnt FROM stock_daily
+                SELECT COUNT(*) as cnt FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
                 AND volume < 0
             ''', (start_date, end_date))
@@ -668,7 +668,7 @@ class DataValidator:
 
             # OHLC异常：low > high 或 open/high/low/close 为0但volume > 0
             cursor.execute('''
-                SELECT COUNT(*) as cnt FROM stock_daily
+                SELECT COUNT(*) as cnt FROM t_stock_daily
                 WHERE trade_date BETWEEN ? AND ?
                 AND (low > high
                      OR (close = 0 AND volume > 0)

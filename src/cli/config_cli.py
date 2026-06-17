@@ -45,16 +45,6 @@ def set_eastmoney_token(token: str) -> None:
     print(f"东财掘金 Token 已设置")
 
 
-def set_qmt_account(account: str, password: str = None) -> None:
-    """设置 QMT 账号"""
-    config = _load_config()
-    config.setdefault("credentials", {}).setdefault("qmt", {})["account"] = account
-    if password:
-        config["credentials"]["qmt"]["password"] = password
-    _save_config(config)
-    print(f"QMT 账号已设置")
-
-
 def set_data_source(source: str) -> None:
     """设置默认数据源"""
     config = _load_config()
@@ -89,13 +79,6 @@ def show_config() -> None:
         masked = token[:8] + '...' + token[-4:] if len(token) > 12 else '***'
         print(f"\n  东财掘金 Token: {masked}")
 
-    if 'qmt' in creds:
-        account = creds['qmt'].get('account', '')
-        masked = account[:3] + '***' + account[-3:] if len(account) > 6 else '***'
-        print(f"  QMT 账号: {masked}")
-        has_pwd = '***' if creds['qmt'].get('password') else '(未设置)'
-        print(f"  QMT 密码: {has_pwd}")
-
     # 配置信息
     config = _load_config()
     if 'data_source' in config:
@@ -127,22 +110,12 @@ def _interactive_set_token():
         set_eastmoney_token(token)
 
 
-def _interactive_set_qmt():
-    print("\n--- 配置 QMT 账号 ---")
-    config = _load_config()
-    current_account = config.get("credentials", {}).get("qmt", {}).get("account", "")
-    account = prompt_input("QMT 账号", current_account if current_account else None)
-    password = prompt_input("QMT 密码")
-    if account:
-        set_qmt_account(account, password if password else None)
-
-
 def _interactive_set_data_source():
     print("\n--- 配置数据源 ---")
     from .interactive import prompt_choice
-    options = ['eastmoney (东财掘金 API)', 'database (本地数据库)', 'qmt (QMT交易端)']
+    options = ['eastmoney (东财掘金 API)', 'database (本地数据库)']
     idx = prompt_choice("请选择默认数据源", options)
-    sources = ['eastmoney', 'database', 'qmt']
+    sources = ['eastmoney', 'database']
     set_data_source(sources[idx])
 
 
@@ -160,9 +133,8 @@ def run_config_interactive():
     menu = InteractiveMenu("配置管理")
     menu.add_option('1', '查看当前配置', _interactive_show_config)
     menu.add_option('2', '配置东财掘金 Token', _interactive_set_token)
-    menu.add_option('3', '配置 QMT 账号', _interactive_set_qmt)
-    menu.add_option('4', '配置数据源', _interactive_set_data_source)
-    menu.add_option('5', '配置日志级别', _interactive_set_log_level)
+    menu.add_option('3', '配置数据源', _interactive_set_data_source)
+    menu.add_option('4', '配置日志级别', _interactive_set_log_level)
     menu.run()
 
 
@@ -171,8 +143,8 @@ def run_config_interactive():
 def setup_config_parser(parser: argparse.ArgumentParser) -> None:
     """配置 config 子命令的参数"""
     parser.add_argument('--token', help='设置东财掘金 Token')
-    parser.add_argument('--qmt-account', help='设置 QMT 账号')
-    parser.add_argument('--qmt-password', help='设置 QMT 密码')
+    parser.add_argument('--data-source',
+                        help='设置默认数据源（eastmoney/database）')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                         help='设置日志级别')
     parser.add_argument('--show', action='store_true', help='显示当前配置')
@@ -182,8 +154,8 @@ def run_config_command(args) -> None:
     """执行 config 命令"""
     # 如果没有传任何参数，进入交互模式
     has_args = any([
-        args.token, args.qmt_account, args.qmt_password,
-        args.log_level, args.show
+        args.token,
+        args.data_source, args.log_level, args.show
     ])
 
     if not has_args:
@@ -197,8 +169,8 @@ def run_config_command(args) -> None:
     if args.token:
         set_eastmoney_token(args.token)
 
-    if args.qmt_account:
-        set_qmt_account(args.qmt_account, args.qmt_password)
+    if args.data_source:
+        set_data_source(args.data_source)
 
     if args.log_level:
         set_log_level(args.log_level)

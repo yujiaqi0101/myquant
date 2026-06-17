@@ -26,7 +26,7 @@ class EastmoneyConnector:
         self,
         token: str,
         max_rows: int = 33000,
-        request_interval: float = 0.5,
+        request_interval: float = 0.1,
         retry_attempts: int = 3,
         retry_interval: float = 2.0,
     ):
@@ -62,7 +62,8 @@ class EastmoneyConnector:
         for attempt in range(self._retry_attempts):
             try:
                 result = func(*args, **kwargs)
-                time.sleep(self._request_interval)  # 流控
+                if self._request_interval > 0:
+                    time.sleep(self._request_interval)  # 流控
                 return result
             except Exception as e:
                 last_error = e
@@ -162,72 +163,6 @@ class EastmoneyConnector:
             df=True,
         )
         return df
-
-    def get_dividend(
-        self,
-        symbol: str,
-        start_date: str = None,
-        end_date: str = None,
-    ) -> pd.DataFrame:
-        """
-        获取股票除权除息信息
-
-        对应东财掘金 API: stk_get_dividend
-
-        Parameters
-        ----------
-        symbol : str
-            股票代码（掘金格式），如 'SHSE.600000'
-        start_date : str, optional
-            起始日期 'YYYY-MM-DD'
-        end_date : str, optional
-            结束日期 'YYYY-MM-DD'
-
-        Returns
-        -------
-        pd.DataFrame
-            除权除息信息，包含：
-            - ex_date: 除权除息日
-            - record_date: 股权登记日
-            - pay_date: 派息日
-            - dividend_per_share: 每股派息（元）
-            - split_ratio: 送转股比例
-        """
-        try:
-            from gm.api import stk_get_dividend
-        except ImportError:
-            logger.warning("gm.api.stk_get_dividend 不可用")
-            return pd.DataFrame()
-
-        try:
-            kwargs = {}
-            if start_date:
-                kwargs['start_date'] = start_date
-            if end_date:
-                kwargs['end_date'] = end_date
-
-            df = self._request_with_retry(stk_get_dividend, symbol=symbol, **kwargs)
-            if df is None or df.empty:
-                return pd.DataFrame()
-
-            # 标准化列名
-            rename_map = {
-                'ex_dividend_date': 'ex_date',
-                'ex_date': 'ex_date',
-                'record_date': 'record_date',
-                'pay_date': 'pay_date',
-                'dividend': 'dividend_per_share',
-                'split_ratio': 'split_ratio',
-            }
-            df = df.rename(columns=rename_map)
-
-            # 添加 stock_code 列
-            df['stock_code'] = symbol
-
-            return df
-        except Exception as e:
-            logger.warning(f"获取 {symbol} 除权除息信息失败: {e}")
-            return pd.DataFrame()
 
     def get_stock_list(self, trade_date: str = None) -> pd.DataFrame:
         """
@@ -392,6 +327,152 @@ class EastmoneyConnector:
 
         return self._request_with_retry(stk_get_finance_deriv_pt, **kwargs)
 
+    def get_financial_deriv_batch(
+        self,
+        symbols: List[str],
+        fields: str,
+        date: str = None,
+        max_fields_per_request: int = 20,
+    ) -> pd.DataFrame:
+        """
+        分批获取财务衍生指标截面数据，每次最多请求 max_fields_per_request 个字段，
+        然后按 symbol + pub_date + rpt_date 合并结果。
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            完整字段列表，逗号分隔
+        date : str
+            查询日期 'YYYY-MM-DD'
+        max_fields_per_request : int
+            每次请求最大字段数，默认 20
+
+        Returns
+        -------
+        pd.DataFrame
+            合并后的财务衍生指标数据
+        """
+        field_list = [f.strip() for f in fields.split(',') if f.strip()]
+        if len(field_list) <= max_fields_per_request:
+            return self.get_financial_deriv(symbols=symbols, fields=fields, date=date)
+
+        # 分批请求
+        merge_cols = ['symbol', 'pub_date', 'rpt_date']
+        result_df = None
+
+        for i in range(0, len(field_list), max_fields_per_request):
+            batch_fields = ','.join(field_list[i:i + max_fields_per_request])
+            logger.debug(f"财务数据分批请求字段 {i // max_fields_per_request + 1}: {batch_fields}")
+            try:
+                df = self.get_financial_deriv(symbols=symbols, fields=batch_fields, date=date)
+                if df is not None and not df.empty:
+                    if result_df is None:
+                        result_df = df
+                    else:
+                        # 按 symbol + pub_date + rpt_date 合并
+                        # 只保留新批次的数据列（非合并键列）
+                        new_cols = [c for c in df.columns if c not in merge_cols]
+                        result_df = result_df.merge(
+                            df[merge_cols + new_cols],
+                            on=merge_cols,
+                            how='outer',
+                        )
+            except Exception as e:
+                logger.warning(f"财务数据字段批次 {i // max_fields_per_request + 1} 请求失败: {e}")
+
+        return result_df if result_df is not None else pd.DataFrame()
+
+    def get_financial_prime(
+        self,
+        symbols: List[str],
+        fields: str = 'eps_basic',
+        date: str = None,
+    ) -> pd.DataFrame:
+        """
+        获取财务主要指标截面数据
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            字段列表，如 'eps_basic,eps_dil,roe'
+        date : str
+            查询日期 'YYYY-MM-DD'
+
+        Returns
+        -------
+        pd.DataFrame
+            财务主要指标数据
+        """
+        from gm.api import stk_get_finance_prime_pt
+
+        kwargs = dict(
+            symbols=symbols,
+            fields=fields,
+            df=True,
+        )
+        if date:
+            kwargs['date'] = date
+
+        return self._request_with_retry(stk_get_finance_prime_pt, **kwargs)
+
+    def get_financial_prime_batch(
+        self,
+        symbols: List[str],
+        fields: str,
+        date: str = None,
+        max_fields_per_request: int = 20,
+    ) -> pd.DataFrame:
+        """
+        分批获取财务主要指标截面数据，每次最多请求 max_fields_per_request 个字段，
+        然后按 symbol + pub_date + rpt_date 合并结果。
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            完整字段列表，逗号分隔
+        date : str
+            查询日期 'YYYY-MM-DD'
+        max_fields_per_request : int
+            每次请求最大字段数，默认 20
+
+        Returns
+        -------
+        pd.DataFrame
+            合并后的财务主要指标数据
+        """
+        field_list = [f.strip() for f in fields.split(',') if f.strip()]
+        if len(field_list) <= max_fields_per_request:
+            return self.get_financial_prime(symbols=symbols, fields=fields, date=date)
+
+        merge_cols = ['symbol', 'pub_date', 'rpt_date']
+        result_df = None
+
+        for i in range(0, len(field_list), max_fields_per_request):
+            batch_fields = ','.join(field_list[i:i + max_fields_per_request])
+            logger.debug(f"财务主要指标字段批次 {i // max_fields_per_request + 1}: {batch_fields}")
+            try:
+                df = self.get_financial_prime(symbols=symbols, fields=batch_fields, date=date)
+                if df is not None and not df.empty:
+                    if result_df is None:
+                        result_df = df
+                    else:
+                        new_cols = [c for c in df.columns if c not in merge_cols]
+                        result_df = result_df.merge(
+                            df[merge_cols + new_cols],
+                            on=merge_cols,
+                            how='outer',
+                        )
+            except Exception as e:
+                logger.warning(f"财务主要指标字段批次 {i // max_fields_per_request + 1} 请求失败: {e}")
+
+        return result_df if result_df is not None else pd.DataFrame()
+
     def get_daily_valuation(
         self,
         symbols: List[str],
@@ -426,6 +507,61 @@ class EastmoneyConnector:
             kwargs['trade_date'] = trade_date
 
         return self._request_with_retry(stk_get_daily_valuation_pt, **kwargs)
+
+    def get_daily_valuation_batch(
+        self,
+        symbols: List[str],
+        fields: str,
+        trade_date: str = None,
+        max_fields_per_request: int = 20,
+    ) -> pd.DataFrame:
+        """
+        分批获取估值指标单日截面数据，每次最多请求 max_fields_per_request 个字段，
+        然后按 symbol + trade_date 合并结果。
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            完整字段列表，逗号分隔
+        trade_date : str
+            查询日期 'YYYY-MM-DD'
+        max_fields_per_request : int
+            每次请求最大字段数，默认 20
+
+        Returns
+        -------
+        pd.DataFrame
+            合并后的估值指标数据
+        """
+        field_list = [f.strip() for f in fields.split(',') if f.strip()]
+        if len(field_list) <= max_fields_per_request:
+            return self.get_daily_valuation(symbols=symbols, fields=fields, trade_date=trade_date)
+
+        # 分批请求
+        merge_cols = ['symbol', 'trade_date']
+        result_df = None
+
+        for i in range(0, len(field_list), max_fields_per_request):
+            batch_fields = ','.join(field_list[i:i + max_fields_per_request])
+            logger.debug(f"估值数据分批请求字段 {i // max_fields_per_request + 1}: {batch_fields}")
+            try:
+                df = self.get_daily_valuation(symbols=symbols, fields=batch_fields, trade_date=trade_date)
+                if df is not None and not df.empty:
+                    if result_df is None:
+                        result_df = df
+                    else:
+                        new_cols = [c for c in df.columns if c not in merge_cols]
+                        result_df = result_df.merge(
+                            df[merge_cols + new_cols],
+                            on=merge_cols,
+                            how='outer',
+                        )
+            except Exception as e:
+                logger.warning(f"估值数据字段批次 {i // max_fields_per_request + 1} 请求失败: {e}")
+
+        return result_df if result_df is not None else pd.DataFrame()
 
     def get_money_flow(
         self,

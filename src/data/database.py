@@ -42,11 +42,9 @@ class DatabaseManager:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 同一路径只初始化一次表结构
-        abs_path = str(self.db_path.resolve())
-        if abs_path not in DatabaseManager._initialized_paths:
-            self._init_database()
-            DatabaseManager._initialized_paths.add(abs_path)
+        # 每次实例化都检查表结构（CREATE IF NOT EXISTS / ALTER TABLE ADD COLUMN 都是幂等的）
+        # 防止数据库文件外部被修改后程序内无法同步 schema
+        self._init_database()
 
     @contextmanager
     def get_connection(self):
@@ -69,57 +67,79 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # 股票日频数据表
+            # 股票日频数据表 - 对齐东财 history 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS stock_daily (
+                CREATE TABLE IF NOT EXISTS t_stock_daily (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_date DATE NOT NULL,
                     stock_code VARCHAR(20) NOT NULL,
+                    bob TIMESTAMP,
+                    eob TIMESTAMP,
                     open REAL,
                     high REAL,
                     low REAL,
                     close REAL,
                     volume REAL,
                     amount REAL,
+                    position REAL,
+                    frequency VARCHAR(20),
+                    pre_close REAL,
                     vwap REAL,
+                    suspend_flag INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(trade_date, stock_code)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_daily_code ON stock_daily(stock_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_daily_date ON stock_daily(trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_stock_daily_code ON t_stock_daily(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_stock_daily_date ON t_stock_daily(trade_date)')
 
-            # 指数日频数据表
+            # 指数日频数据表 - 对齐东财 history 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS index_daily (
+                CREATE TABLE IF NOT EXISTS t_index_daily (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_date DATE NOT NULL,
                     index_code VARCHAR(20) NOT NULL,
+                    bob TIMESTAMP,
+                    eob TIMESTAMP,
                     open REAL,
                     high REAL,
                     low REAL,
                     close REAL,
                     volume REAL,
+                    amount REAL,
+                    position REAL,
+                    frequency VARCHAR(20),
+                    pre_close REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(trade_date, index_code)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_daily_code ON index_daily(index_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_daily_date ON index_daily(trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_index_daily_code ON t_index_daily(index_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_index_daily_date ON t_index_daily(trade_date)')
 
-            # 股票信息表
+            # 股票信息表 - 对齐东财 get_symbol_infos(sec_type1=1010) 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS stock_info (
+                CREATE TABLE IF NOT EXISTS t_stock_info (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     stock_code VARCHAR(20) UNIQUE NOT NULL,
                     stock_name VARCHAR(100),
+                    sec_id VARCHAR(20),
+                    sec_type1 INTEGER,
+                    sec_type2 INTEGER,
+                    board INTEGER,
+                    exchange VARCHAR(20),
+                    sec_abbr VARCHAR(50),
+                    price_tick REAL,
+                    trade_n INTEGER,
+                    listed_date DATE,
+                    delisted_date DATE,
+                    delisting_begin_date DATE,
                     industry VARCHAR(100),
                     market_cap REAL,
-                    list_date DATE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_info_industry ON stock_info(industry)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_stock_info_industry ON t_stock_info(industry)')
 
             # 执行日志表（增强版）
             cursor.execute('''
@@ -183,7 +203,7 @@ class DatabaseManager:
 
             # 指数成分股/板块成分股表
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS index_constituent (
+                CREATE TABLE IF NOT EXISTS t_stock_in_index (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     index_code VARCHAR(20) NOT NULL,
                     stock_code VARCHAR(20) NOT NULL,
@@ -195,8 +215,8 @@ class DatabaseManager:
                     UNIQUE(index_code, stock_code)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_index ON index_constituent(index_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_stock ON index_constituent(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_index ON t_stock_in_index(index_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_stock ON t_stock_in_index(stock_code)')
 
             # 组合分析结果表
             cursor.execute('''
@@ -241,18 +261,158 @@ class DatabaseManager:
 
             # ============ 扩展现有表字段（ALTER TABLE） ============
             alter_statements = [
-                # stock_daily 新增字段
-                'ALTER TABLE stock_daily ADD COLUMN pre_close REAL',
-                'ALTER TABLE stock_daily ADD COLUMN suspend_flag INTEGER DEFAULT 0',
-                # index_daily 新增字段
-                'ALTER TABLE index_daily ADD COLUMN pre_close REAL',
-                'ALTER TABLE index_daily ADD COLUMN amount REAL',
-                # stock_info 新增字段
-                'ALTER TABLE stock_info ADD COLUMN exchange VARCHAR(20)',
-                'ALTER TABLE stock_info ADD COLUMN product_type INTEGER',
-                'ALTER TABLE stock_info ADD COLUMN float_volume REAL',
-                'ALTER TABLE stock_info ADD COLUMN total_volume REAL',
-                'ALTER TABLE stock_info ADD COLUMN instrument_status INTEGER DEFAULT 0',
+                # t_stock_daily 新增字段
+                'ALTER TABLE t_stock_daily ADD COLUMN pre_close REAL',
+                'ALTER TABLE t_stock_daily ADD COLUMN suspend_flag INTEGER DEFAULT 0',
+                # t_index_daily 新增字段
+                'ALTER TABLE t_index_daily ADD COLUMN pre_close REAL',
+                'ALTER TABLE t_index_daily ADD COLUMN amount REAL',
+                # t_stock_info 新增字段（对齐东财 get_symbol_infos）
+                'ALTER TABLE t_stock_info ADD COLUMN exchange VARCHAR(20)',
+                'ALTER TABLE t_stock_info ADD COLUMN product_type INTEGER',
+                'ALTER TABLE t_stock_info ADD COLUMN float_volume REAL',
+                'ALTER TABLE t_stock_info ADD COLUMN total_volume REAL',
+                'ALTER TABLE t_stock_info ADD COLUMN instrument_status INTEGER DEFAULT 0',
+                'ALTER TABLE t_stock_info ADD COLUMN sec_id VARCHAR(20)',
+                'ALTER TABLE t_stock_info ADD COLUMN sec_type1 INTEGER',
+                'ALTER TABLE t_stock_info ADD COLUMN sec_type2 INTEGER',
+                'ALTER TABLE t_stock_info ADD COLUMN board INTEGER',
+                'ALTER TABLE t_stock_info ADD COLUMN sec_abbr VARCHAR(50)',
+                'ALTER TABLE t_stock_info ADD COLUMN price_tick REAL',
+                'ALTER TABLE t_stock_info ADD COLUMN trade_n INTEGER',
+                'ALTER TABLE t_stock_info ADD COLUMN listed_date DATE',
+                'ALTER TABLE t_stock_info ADD COLUMN delisted_date DATE',
+                'ALTER TABLE t_stock_info ADD COLUMN delisting_begin_date DATE',
+                # t_etf_info 新增字段（对齐东财 get_symbol_infos）
+                'ALTER TABLE t_etf_info ADD COLUMN sec_id VARCHAR(20)',
+                'ALTER TABLE t_etf_info ADD COLUMN sec_type1 INTEGER',
+                'ALTER TABLE t_etf_info ADD COLUMN sec_type2 INTEGER',
+                'ALTER TABLE t_etf_info ADD COLUMN board INTEGER',
+                'ALTER TABLE t_etf_info ADD COLUMN exchange VARCHAR(20)',
+                'ALTER TABLE t_etf_info ADD COLUMN sec_abbr VARCHAR(50)',
+                'ALTER TABLE t_etf_info ADD COLUMN price_tick REAL',
+                'ALTER TABLE t_etf_info ADD COLUMN trade_n INTEGER',
+                'ALTER TABLE t_etf_info ADD COLUMN listed_date DATE',
+                'ALTER TABLE t_etf_info ADD COLUMN delisted_date DATE',
+                'ALTER TABLE t_etf_info ADD COLUMN fund_type TEXT',
+                'ALTER TABLE t_etf_info ADD COLUMN benchmark_index VARCHAR(20)',
+                'ALTER TABLE t_etf_info ADD COLUMN management_fee REAL',
+                'ALTER TABLE t_etf_info ADD COLUMN custodian_fee REAL',
+                'ALTER TABLE t_etf_info ADD COLUMN management_company TEXT',
+                # t_index_info 新增字段（对齐东财 get_symbol_infos）
+                'ALTER TABLE t_index_info ADD COLUMN sec_id VARCHAR(20)',
+                'ALTER TABLE t_index_info ADD COLUMN sec_type1 INTEGER',
+                'ALTER TABLE t_index_info ADD COLUMN sec_type2 INTEGER',
+                'ALTER TABLE t_index_info ADD COLUMN board INTEGER',
+                'ALTER TABLE t_index_info ADD COLUMN exchange VARCHAR(20)',
+                'ALTER TABLE t_index_info ADD COLUMN sec_abbr VARCHAR(50)',
+                'ALTER TABLE t_index_info ADD COLUMN price_tick REAL',
+                'ALTER TABLE t_index_info ADD COLUMN trade_n INTEGER',
+                'ALTER TABLE t_index_info ADD COLUMN listed_date DATE',
+                'ALTER TABLE t_index_info ADD COLUMN delisted_date DATE',
+                'ALTER TABLE t_index_info ADD COLUMN base_date DATE',
+                'ALTER TABLE t_index_info ADD COLUMN base_point REAL',
+                'ALTER TABLE t_index_info ADD COLUMN publish_date DATE',
+                # t_sector_info 新增字段（对齐东财 get_symbol_infos）
+                'ALTER TABLE t_sector_info ADD COLUMN sec_id VARCHAR(20)',
+                'ALTER TABLE t_sector_info ADD COLUMN sec_type1 INTEGER',
+                'ALTER TABLE t_sector_info ADD COLUMN sec_type2 INTEGER',
+                'ALTER TABLE t_sector_info ADD COLUMN exchange VARCHAR(20)',
+                'ALTER TABLE t_sector_info ADD COLUMN sec_abbr VARCHAR(50)',
+                # financial_data 新增字段（对齐东财 stk_get_finance_prime_pt 财务主要指标）
+                'ALTER TABLE financial_data ADD COLUMN pub_date DATE',
+                'ALTER TABLE financial_data ADD COLUMN rpt_date DATE',
+                'ALTER TABLE financial_data ADD COLUMN eps_basic REAL',
+                'ALTER TABLE financial_data ADD COLUMN eps_dil REAL',
+                'ALTER TABLE financial_data ADD COLUMN eps_basic_cut REAL',
+                'ALTER TABLE financial_data ADD COLUMN eps_dil_cut REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_cf_oper_ps REAL',
+                'ALTER TABLE financial_data ADD COLUMN bps_pcom_ps REAL',
+                'ALTER TABLE financial_data ADD COLUMN ttl_ast REAL',
+                'ALTER TABLE financial_data ADD COLUMN ttl_liab REAL',
+                'ALTER TABLE financial_data ADD COLUMN share_cptl REAL',
+                'ALTER TABLE financial_data ADD COLUMN ttl_inc_oper REAL',
+                'ALTER TABLE financial_data ADD COLUMN inc_oper REAL',
+                'ALTER TABLE financial_data ADD COLUMN oper_prof REAL',
+                'ALTER TABLE financial_data ADD COLUMN ttl_prof REAL',
+                'ALTER TABLE financial_data ADD COLUMN ttl_eqy_pcom REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_prof_pcom REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_prof_pcom_cut REAL',
+                'ALTER TABLE financial_data ADD COLUMN roe REAL',
+                'ALTER TABLE financial_data ADD COLUMN roe_weight_avg REAL',
+                'ALTER TABLE financial_data ADD COLUMN roe_cut REAL',
+                'ALTER TABLE financial_data ADD COLUMN roe_weight_avg_cut REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_cf_oper REAL',
+                'ALTER TABLE financial_data ADD COLUMN eps_yoy REAL',
+                'ALTER TABLE financial_data ADD COLUMN inc_oper_yoy REAL',
+                'ALTER TABLE financial_data ADD COLUMN ttl_inc_oper_yoy REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_prof_pcom_yoy REAL',
+                'ALTER TABLE financial_data ADD COLUMN bps_sh REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_asset REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_prof REAL',
+                'ALTER TABLE financial_data ADD COLUMN net_prof_cut REAL',
+                # t_valuation_data 新增字段（对齐东财 stk_get_daily_valuation_pt）
+                'ALTER TABLE t_valuation_data ADD COLUMN pe_mrq REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pe_1q REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pe_2q REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pe_3q REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pe_ttm_cut REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pe_lyr_cut REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pe_mrq_cut REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pb_lyr REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pb_lyr_1 REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pb_mrq_1 REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pcf_ttm_oper REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pcf_ttm_ncf REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pcf_lyr_oper REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN pcf_lyr_ncf REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN ps_lyr REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN ps_mrq REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN ps_1q REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN ps_2q REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN ps_3q REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN peg_lyr REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN peg_mrq REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN peg_np_cgr REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN dy_ttm REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN dy_lfy REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN dv_ratio REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN dv_ttm REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN market_cap REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN circ_market_cap REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN total_share REAL',
+                'ALTER TABLE t_valuation_data ADD COLUMN float_share REAL',
+                # t_dividend_date 新增字段（对齐东财 stk_get_dividend）
+                'ALTER TABLE t_dividend_date ADD COLUMN pub_date DATE',
+                'ALTER TABLE t_dividend_date ADD COLUMN scheme_type TEXT',
+                'ALTER TABLE t_dividend_date ADD COLUMN transfer_ratio REAL DEFAULT 0',
+                'ALTER TABLE t_dividend_date ADD COLUMN bonus_ratio_ration REAL DEFAULT 0',
+                'ALTER TABLE t_dividend_date ADD COLUMN equity_reg_date DATE',
+                'ALTER TABLE t_dividend_date ADD COLUMN cash_pay_date DATE',
+                'ALTER TABLE t_dividend_date ADD COLUMN share_acct_date DATE',
+                'ALTER TABLE t_dividend_date ADD COLUMN share_lst_date DATE',
+                'ALTER TABLE t_dividend_date ADD COLUMN cash_af_tax REAL',
+                'ALTER TABLE t_dividend_date ADD COLUMN cash_bf_tax REAL',
+                'ALTER TABLE t_dividend_date ADD COLUMN bonus_ratio REAL',
+                'ALTER TABLE t_dividend_date ADD COLUMN convert_ratio REAL',
+                'ALTER TABLE t_dividend_date ADD COLUMN base_date DATE',
+                'ALTER TABLE t_dividend_date ADD COLUMN base_share REAL',
+                'ALTER TABLE t_dividend_date ADD COLUMN dvd_target TEXT',
+                # t_stock_daily 新增字段（对齐东财 history）
+                'ALTER TABLE t_stock_daily ADD COLUMN bob TIMESTAMP',
+                'ALTER TABLE t_stock_daily ADD COLUMN eob TIMESTAMP',
+                'ALTER TABLE t_stock_daily ADD COLUMN position REAL',
+                'ALTER TABLE t_stock_daily ADD COLUMN frequency VARCHAR(20)',
+                # t_index_daily 新增字段（对齐东财 history）
+                'ALTER TABLE t_index_daily ADD COLUMN bob TIMESTAMP',
+                'ALTER TABLE t_index_daily ADD COLUMN eob TIMESTAMP',
+                'ALTER TABLE t_index_daily ADD COLUMN position REAL',
+                'ALTER TABLE t_index_daily ADD COLUMN frequency VARCHAR(20)',
+                # t_etf_daily 新增字段（对齐东财 history）
+                'ALTER TABLE t_etf_daily ADD COLUMN bob TIMESTAMP',
+                'ALTER TABLE t_etf_daily ADD COLUMN eob TIMESTAMP',
+                'ALTER TABLE t_etf_daily ADD COLUMN position REAL',
+                'ALTER TABLE t_etf_daily ADD COLUMN frequency VARCHAR(20)',
             ]
             for stmt in alter_statements:
                 try:
@@ -260,33 +420,115 @@ class DatabaseManager:
                 except sqlite3.OperationalError:
                     pass  # 字段已存在，忽略
 
+            # ============ 迁移：重建 financial_data 表 ============
+            # 旧版 financial_data 表字段与当前"财务主要指标"不一致（旧版可能有 report_date
+            # 或财务衍生指标字段），需要重建为正确的财务主要指标字段结构
+            cursor.execute("PRAGMA table_info(financial_data)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            # 财务主要指标表应有的列
+            expected_cols = {
+                'id', 'stock_code', 'pub_date', 'rpt_date',
+                'eps_basic', 'eps_dil', 'eps_basic_cut', 'eps_dil_cut',
+                'net_cf_oper_ps', 'bps_pcom_ps',
+                'ttl_ast', 'ttl_liab', 'share_cptl',
+                'ttl_inc_oper', 'inc_oper', 'oper_prof', 'ttl_prof',
+                'ttl_eqy_pcom', 'net_prof_pcom', 'net_prof_pcom_cut',
+                'roe', 'roe_weight_avg', 'roe_cut', 'roe_weight_avg_cut',
+                'net_cf_oper', 'eps_yoy', 'inc_oper_yoy', 'ttl_inc_oper_yoy',
+                'net_prof_pcom_yoy', 'bps_sh', 'net_asset', 'net_prof', 'net_prof_cut',
+                'created_at', 'updated_at',
+            }
+            needs_rebuild = bool(existing_cols) and (
+                # 含旧字段 report_date/stat_date 等
+                'report_date' in existing_cols
+                or 'stat_date' in existing_cols
+                or 'eps_dil2' in existing_cols
+                # 缺少财务主要指标关键列
+                or 'ttl_ast' not in existing_cols
+                or 'ttl_liab' not in existing_cols
+                or 'ttl_inc_oper' not in existing_cols
+                or 'bps_sh' not in existing_cols
+                # 有多余的旧衍生指标列
+                or len(existing_cols - expected_cols) > 0
+            )
+            if needs_rebuild:
+                logger.info(f"检测到 financial_data 表结构需重建 (现有 {len(existing_cols)} 列)，正在迁移...")
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS financial_data_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        stock_code VARCHAR(20) NOT NULL,
+                        pub_date DATE,
+                        rpt_date DATE,
+                        eps_basic REAL,
+                        eps_dil REAL,
+                        eps_basic_cut REAL,
+                        eps_dil_cut REAL,
+                        net_cf_oper_ps REAL,
+                        bps_pcom_ps REAL,
+                        ttl_ast REAL,
+                        ttl_liab REAL,
+                        share_cptl REAL,
+                        ttl_inc_oper REAL,
+                        inc_oper REAL,
+                        oper_prof REAL,
+                        ttl_prof REAL,
+                        ttl_eqy_pcom REAL,
+                        net_prof_pcom REAL,
+                        net_prof_pcom_cut REAL,
+                        roe REAL,
+                        roe_weight_avg REAL,
+                        roe_cut REAL,
+                        roe_weight_avg_cut REAL,
+                        net_cf_oper REAL,
+                        eps_yoy REAL,
+                        inc_oper_yoy REAL,
+                        ttl_inc_oper_yoy REAL,
+                        net_prof_pcom_yoy REAL,
+                        bps_sh REAL,
+                        net_asset REAL,
+                        net_prof REAL,
+                        net_prof_cut REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(stock_code, rpt_date)
+                    )
+                ''')
+                # 删除旧表，重命名新表（旧字段已不再兼容，不做数据迁移，下次运行时会重新拉取）
+                cursor.execute('DROP TABLE IF EXISTS financial_data')
+                cursor.execute('ALTER TABLE financial_data_new RENAME TO financial_data')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON financial_data(stock_code)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_data(rpt_date)')
+                logger.info("financial_data 表重建完成（财务主要指标字段）")
+
             # ============ 新增表 ============
 
-            # QMT合约完整信息表
+            # 指数基本信息表 - 对齐东财 get_symbol_infos(sec_type1=1060, sec_type2=106001) 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS qmt_instrument (
+                CREATE TABLE IF NOT EXISTS t_index_info (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    stock_code VARCHAR(20) UNIQUE NOT NULL,
-                    instrument_name VARCHAR(100),
-                    exchange_id VARCHAR(20),
-                    product_type INTEGER,
-                    open_date VARCHAR(20),
-                    pre_close REAL,
-                    up_stop_price REAL,
-                    down_stop_price REAL,
-                    float_volume REAL,
-                    total_volume REAL,
+                    index_code VARCHAR(20) UNIQUE NOT NULL,
+                    index_name VARCHAR(100),
+                    sec_id VARCHAR(20),
+                    sec_type1 INTEGER,
+                    sec_type2 INTEGER,
+                    board INTEGER,
+                    exchange VARCHAR(20),
+                    sec_abbr VARCHAR(50),
                     price_tick REAL,
-                    instrument_status INTEGER DEFAULT 0,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    trade_n INTEGER,
+                    listed_date DATE,
+                    delisted_date DATE,
+                    base_date DATE,
+                    base_point REAL,
+                    publish_date DATE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_qmt_instrument_code ON qmt_instrument(stock_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_qmt_instrument_type ON qmt_instrument(product_type)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_index_info_code ON t_index_info(index_code)')
 
             # 数据同步日志表
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS data_sync_log (
+                CREATE TABLE IF NOT EXISTS t_data_sync (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sync_type VARCHAR(50) NOT NULL,
                     start_time VARCHAR(20),
@@ -298,27 +540,54 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_log_type ON data_sync_log(sync_type)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_log_status ON data_sync_log(status)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_log_type ON t_data_sync(sync_type)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_log_status ON t_data_sync(status)')
 
             # ============ 估值分析模块表 ============
 
-            # 财务数据表 - 存储资产负债表、利润表、现金流量表
+            # 财务主要指标表 - 对齐东财 stk_get_finance_prime_pt 返回字段
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS financial_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     stock_code VARCHAR(20) NOT NULL,
-                    report_date VARCHAR(20) NOT NULL,
-                    table_name VARCHAR(20) NOT NULL,
-                    data_json TEXT,
+                    pub_date DATE,
+                    rpt_date DATE,
+                    eps_basic REAL,
+                    eps_dil REAL,
+                    eps_basic_cut REAL,
+                    eps_dil_cut REAL,
+                    net_cf_oper_ps REAL,
+                    bps_pcom_ps REAL,
+                    ttl_ast REAL,
+                    ttl_liab REAL,
+                    share_cptl REAL,
+                    ttl_inc_oper REAL,
+                    inc_oper REAL,
+                    oper_prof REAL,
+                    ttl_prof REAL,
+                    ttl_eqy_pcom REAL,
+                    net_prof_pcom REAL,
+                    net_prof_pcom_cut REAL,
+                    roe REAL,
+                    roe_weight_avg REAL,
+                    roe_cut REAL,
+                    roe_weight_avg_cut REAL,
+                    net_cf_oper REAL,
+                    eps_yoy REAL,
+                    inc_oper_yoy REAL,
+                    ttl_inc_oper_yoy REAL,
+                    net_prof_pcom_yoy REAL,
+                    bps_sh REAL,
+                    net_asset REAL,
+                    net_prof REAL,
+                    net_prof_cut REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(stock_code, report_date, table_name)
+                    UNIQUE(stock_code, rpt_date)
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON financial_data(stock_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_data(report_date)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_table ON financial_data(table_name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_data(rpt_date)')
 
             # 估值结果表 - 各估值方法的结果
             cursor.execute('''
@@ -370,7 +639,7 @@ class DatabaseManager:
 
             # ============ 股票池表 ============
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS stock_pool (
+                CREATE TABLE IF NOT EXISTS t_stock_pool (
                     pool_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pool_name VARCHAR(100) NOT NULL UNIQUE,
                     pool_code VARCHAR(50),
@@ -381,32 +650,32 @@ class DatabaseManager:
             ''')
 
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS stock_pool_member (
+                CREATE TABLE IF NOT EXISTS t_stock_in_stock_pool (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pool_id INTEGER NOT NULL,
                     stock_code VARCHAR(20) NOT NULL,
                     added_date DATE,
                     removed_date DATE,
-                    FOREIGN KEY (pool_id) REFERENCES stock_pool(pool_id) ON DELETE CASCADE,
+                    FOREIGN KEY (pool_id) REFERENCES t_stock_pool(pool_id) ON DELETE CASCADE,
                     UNIQUE(pool_id, stock_code, added_date)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pool_member_pool ON stock_pool_member(pool_id)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pool_member_stock ON stock_pool_member(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pool_member_pool ON t_stock_in_stock_pool(pool_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pool_member_stock ON t_stock_in_stock_pool(stock_code)')
 
             # ============ 交易日历表 ============
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trade_calendar (
+                CREATE TABLE IF NOT EXISTS t_trading_date (
                     trade_date TEXT PRIMARY KEY
                 )
             ''')
-            # 首次创建时从 stock_daily 填充
-            cursor.execute('SELECT COUNT(*) as cnt FROM trade_calendar')
+            # 首次创建时从 t_stock_daily 填充
+            cursor.execute('SELECT COUNT(*) as cnt FROM t_trading_date')
             count = cursor.fetchone()['cnt']
             if count == 0:
                 cursor.execute('''
-                    INSERT OR IGNORE INTO trade_calendar (trade_date)
-                    SELECT DISTINCT trade_date FROM stock_daily
+                    INSERT OR IGNORE INTO t_trading_date (trade_date)
+                    SELECT DISTINCT trade_date FROM t_stock_daily
                 ''')
                 logger.info(f"交易日历表已填充 {cursor.rowcount} 条记录")
 
@@ -523,252 +792,392 @@ class DatabaseManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_ql_q5_factor ON quantlab_quintile_results(factor_name)')
 
-            # ============ P0 新增表：飞书文档"## 数据库"章节补全 ============
+            # ============ 新增表（spec 要求） ============
 
-            # 除权除息日表（飞书"系统表 - 除权除息日"）
+            # ETF 基本信息表 - 对齐东财 get_symbol_infos(sec_type1=1020, sec_type2=102001) 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS dividend_date (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    stock_code VARCHAR(20) NOT NULL,
-                    ex_date DATE NOT NULL,
-                    record_date DATE,
-                    pay_date DATE,
-                    dividend_per_share REAL DEFAULT 0,
-                    split_ratio REAL DEFAULT 1.0,
-                    source VARCHAR(50) DEFAULT 'eastmoney',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(stock_code, ex_date)
-                )
-            ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dividend_code ON dividend_date(stock_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dividend_date ON dividend_date(ex_date)')
-
-            # ETF 基本信息表（飞书"ETF - ETF基本信息"）
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS etf_info (
+                CREATE TABLE IF NOT EXISTS t_etf_info (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     etf_code VARCHAR(20) NOT NULL UNIQUE,
                     etf_name TEXT,
-                    underlying_index VARCHAR(50),
-                    list_date DATE,
-                    fund_manager TEXT,
-                    total_share REAL,
-                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    sec_id VARCHAR(20),
+                    sec_type1 INTEGER,
+                    sec_type2 INTEGER,
+                    board INTEGER,
+                    exchange VARCHAR(20),
+                    sec_abbr VARCHAR(50),
+                    price_tick REAL,
+                    trade_n INTEGER,
+                    listed_date DATE,
+                    delisted_date DATE,
+                    fund_type TEXT,
+                    benchmark_index VARCHAR(20),
+                    management_fee REAL,
+                    custodian_fee REAL,
+                    management_company TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_etf_info_code ON t_etf_info(etf_code)')
 
-            # ETF 成分股表（按 trade_date 维度的成分）
+            # ETF 日频数据表 - 对齐东财 history 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS etf_constituent (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    etf_code VARCHAR(20) NOT NULL,
-                    stock_code VARCHAR(20) NOT NULL,
-                    trade_date DATE NOT NULL,
-                    amount REAL,
-                    source VARCHAR(50) DEFAULT 'eastmoney',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(etf_code, stock_code, trade_date)
-                )
-            ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_etf ON etf_constituent(etf_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_stock ON etf_constituent(stock_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_date ON etf_constituent(trade_date)')
-
-            # ETF 日频数据表（飞书"ETF - ETF日频数据"）
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS etf_daily (
+                CREATE TABLE IF NOT EXISTS t_etf_daily (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_date DATE NOT NULL,
                     etf_code VARCHAR(20) NOT NULL,
+                    bob TIMESTAMP,
+                    eob TIMESTAMP,
                     open REAL,
                     high REAL,
                     low REAL,
                     close REAL,
                     volume REAL,
                     amount REAL,
-                    source VARCHAR(50) DEFAULT 'eastmoney',
+                    position REAL,
+                    frequency VARCHAR(20),
+                    pre_close REAL,
+                    vwap REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(trade_date, etf_code)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_daily_code ON etf_daily(etf_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_daily_date ON etf_daily(trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_etf_daily_code ON t_etf_daily(etf_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_etf_daily_date ON t_etf_daily(trade_date)')
 
-            # 指数基本信息表（飞书"指数 - 指数基本信息"）
+            # 板块基本信息表 - 对齐东财 get_symbol_infos(sec_type1=1070, sec_type2=107001) 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS index_info (
+                CREATE TABLE IF NOT EXISTS t_sector_info (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    index_code VARCHAR(20) NOT NULL UNIQUE,
-                    index_name TEXT,
-                    index_type VARCHAR(20),
-                    publish_date DATE,
-                    source VARCHAR(50) DEFAULT 'eastmoney',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    sector_code VARCHAR(20) NOT NULL UNIQUE,
+                    sector_name TEXT NOT NULL,
+                    sec_id VARCHAR(20),
+                    sec_type1 INTEGER,
+                    sec_type2 INTEGER,
+                    exchange VARCHAR(20),
+                    sec_abbr VARCHAR(50),
+                    sector_type TEXT NOT NULL DEFAULT '概念',
+                    parent_sector VARCHAR(20),
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_sector_info_code ON t_sector_info(sector_code)')
 
-            # 板块基本信息表（飞书"板块 - 板块基本信息"）
+            # 板块成分股表（与 t_stock_in_index 区分：index=指数+权重，sector=板块成分股）
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS sector_info (
+                CREATE TABLE IF NOT EXISTS t_stock_list_in_sector (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sector_code VARCHAR(50) NOT NULL UNIQUE,
-                    sector_name TEXT,
-                    sector_type VARCHAR(20) DEFAULT 'concept',
-                    source VARCHAR(50) DEFAULT 'eastmoney',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # 板块成分股表（飞书"板块 - 板块成分股" → 通达信）
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS sector_constituent (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sector_code VARCHAR(50) NOT NULL,
+                    sector_code VARCHAR(20) NOT NULL,
                     stock_code VARCHAR(20) NOT NULL,
-                    trade_date DATE NOT NULL,
-                    source VARCHAR(50) DEFAULT 'tdx',
+                    in_date DATE,
+                    out_date DATE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(sector_code, stock_code, trade_date)
+                    UNIQUE(sector_code, stock_code, in_date)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_sector ON sector_constituent(sector_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_stock ON sector_constituent(stock_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_date ON sector_constituent(trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_code ON t_stock_list_in_sector(sector_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sector_const_stock ON t_stock_list_in_sector(stock_code)')
 
-            # 因子组合表（飞书"因子 - 因子组合"）
+            # 除权除息表 - 对齐东财 stk_get_dividend 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS factor_combination (
+                CREATE TABLE IF NOT EXISTS t_dividend_date (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    combo_name TEXT NOT NULL,
-                    factor_names TEXT NOT NULL,
-                    weight_method VARCHAR(30) DEFAULT 'equal',
-                    description TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    stock_code VARCHAR(20) NOT NULL,
+                    ex_date DATE NOT NULL,
+                    pub_date DATE,
+                    dividend_type TEXT,
+                    scheme_type TEXT,
+                    per_cash_dividend REAL DEFAULT 0,
+                    per_share_dividend REAL DEFAULT 0,
+                    per_share_conversion REAL DEFAULT 0,
+                    transfer_ratio REAL DEFAULT 0,
+                    bonus_ratio_ration REAL DEFAULT 0,
+                    allotment_ratio REAL DEFAULT 0,
+                    allotment_price REAL DEFAULT 0,
+                    equity_reg_date DATE,
+                    cash_pay_date DATE,
+                    share_acct_date DATE,
+                    share_lst_date DATE,
+                    cash_af_tax REAL,
+                    cash_bf_tax REAL,
+                    bonus_ratio REAL,
+                    convert_ratio REAL,
+                    base_date DATE,
+                    base_share REAL,
+                    dvd_target TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(stock_code, ex_date, dividend_type)
                 )
             ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_dividend_date_code ON t_dividend_date(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_dividend_date_date ON t_dividend_date(ex_date)')
 
-            # 策略基本信息表（飞书"策略 - 策略基本信息"）
+            # 策略元数据表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS strategy_info (
-                    strategy_id TEXT PRIMARY KEY,
-                    strategy_name TEXT NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id VARCHAR(50) NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
                     description TEXT,
-                    applicable_scenario TEXT,
+                    applicable_scene TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_info_id ON strategy_info(strategy_id)')
 
-            # 策略标签表（飞书"策略 - 策略标签"）
+            # 策略标签表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS strategy_tag (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    strategy_id TEXT NOT NULL,
-                    tag_name TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(strategy_id, tag_name),
-                    FOREIGN KEY (strategy_id) REFERENCES strategy_info(strategy_id) ON DELETE CASCADE
+                    strategy_id VARCHAR(50) NOT NULL,
+                    tag TEXT NOT NULL,
+                    UNIQUE(strategy_id, tag),
+                    FOREIGN KEY (strategy_id) REFERENCES strategy_info(strategy_id)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_tag_strategy ON strategy_tag(strategy_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_tag_id ON strategy_tag(strategy_id)')
 
-            # 策略最佳表现表（飞书"策略 - 策略最佳表现"）
+            # 策略最佳表现表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS strategy_best_perf (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    strategy_id TEXT NOT NULL,
+                    strategy_id VARCHAR(50) NOT NULL,
+                    version TEXT NOT NULL DEFAULT 'latest',
+                    best_sharpe REAL,
+                    best_return REAL,
+                    best_max_dd REAL,
                     best_experiment_id TEXT,
                     best_source TEXT,
-                    best_metric TEXT,
-                    best_value REAL,
-                    best_sharpe REAL,
-                    best_max_drawdown REAL,
-                    best_annual_return REAL,
                     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(strategy_id),
-                    FOREIGN KEY (strategy_id) REFERENCES strategy_info(strategy_id) ON DELETE CASCADE
+                    extras_json TEXT,
+                    UNIQUE(strategy_id, version)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_best_perf_strategy ON strategy_best_perf(strategy_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_best_perf_id ON strategy_best_perf(strategy_id)')
 
-            # 因子执行日志表（飞书"因子 - 因子执行日志"）
+            # 估值数据表 - 对齐东财 stk_get_daily_valuation_pt 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS factor_execution_log (
+                CREATE TABLE IF NOT EXISTS t_valuation_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    factor_name TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    execution_time_ms REAL,
-                    status TEXT,
-                    error_message TEXT,
-                    executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_factor_execution_log_factor ON factor_execution_log(factor_name)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_factor_execution_log_date ON factor_execution_log(trade_date)')
-
-            # 估值数据表（飞书"估值数据"，原 valuation_result 是分析结果而非原始数据）
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS valuation_data (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
+                    trade_date DATE NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
                     pe_ttm REAL,
+                    pe_lyr REAL,
+                    pe_mrq REAL,
+                    pe_1q REAL,
+                    pe_2q REAL,
+                    pe_3q REAL,
+                    pe_ttm_cut REAL,
+                    pe_lyr_cut REAL,
+                    pe_mrq_cut REAL,
+                    pe_1q_cut REAL,
+                    pe_2q_cut REAL,
+                    pe_3q_cut REAL,
+                    pb_lyr REAL,
+                    pb_lf REAL,
                     pb_mrq REAL,
+                    pcf_ttm_oper REAL,
+                    pcf_ttm_ncf REAL,
+                    pcf_lyr_oper REAL,
+                    pcf_lyr_ncf REAL,
                     ps_ttm REAL,
-                    pcf_ttm REAL,
-                    a_mv REAL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(symbol, trade_date)
+                    ps_lyr REAL,
+                    ps_mrq REAL,
+                    ps_1q REAL,
+                    ps_2q REAL,
+                    ps_3q REAL,
+                    peg_lyr REAL,
+                    peg_1q REAL,
+                    peg_2q REAL,
+                    peg_3q REAL,
+                    dy_ttm REAL,
+                    dy_lfy REAL,
+                    market_cap REAL,
+                    circ_market_cap REAL,
+                    total_share REAL,
+                    float_share REAL,
+                    total_mv REAL,
+                    circ_mv REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, stock_code)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_valuation_data_symbol_date ON valuation_data(symbol, trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_valuation_date ON t_valuation_data(trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_valuation_code ON t_valuation_data(stock_code)')
+
+            # ============ 确保关键表列齐全：补全因旧 schema 缺失的列 ============
+            # 定义每个表所有列的完整定义（name, type, default）
+            # 注意：CREATE TABLE IF NOT EXISTS 只会在表不存在时创建；
+            #       对已存在的旧表，需要 ALTER TABLE ADD COLUMN 来逐列补齐
+            table_columns = {
+                't_stock_daily': [
+                    ('bob', 'TIMESTAMP', None),
+                    ('eob', 'TIMESTAMP', None),
+                    ('open', 'REAL', None),
+                    ('high', 'REAL', None),
+                    ('low', 'REAL', None),
+                    ('close', 'REAL', None),
+                    ('volume', 'REAL', None),
+                    ('amount', 'REAL', None),
+                    ('position', 'REAL', None),
+                    ('frequency', 'VARCHAR(20)', None),
+                    ('pre_close', 'REAL', None),
+                    ('vwap', 'REAL', None),
+                    ('suspend_flag', 'INTEGER', '0'),
+                ],
+                't_etf_daily': [
+                    ('bob', 'TIMESTAMP', None),
+                    ('eob', 'TIMESTAMP', None),
+                    ('open', 'REAL', None),
+                    ('high', 'REAL', None),
+                    ('low', 'REAL', None),
+                    ('close', 'REAL', None),
+                    ('volume', 'REAL', None),
+                    ('amount', 'REAL', None),
+                    ('position', 'REAL', None),
+                    ('frequency', 'VARCHAR(20)', None),
+                    ('pre_close', 'REAL', None),
+                    ('vwap', 'REAL', None),
+                ],
+                't_index_daily': [
+                    ('bob', 'TIMESTAMP', None),
+                    ('eob', 'TIMESTAMP', None),
+                    ('open', 'REAL', None),
+                    ('high', 'REAL', None),
+                    ('low', 'REAL', None),
+                    ('close', 'REAL', None),
+                    ('volume', 'REAL', None),
+                    ('amount', 'REAL', None),
+                    ('position', 'REAL', None),
+                    ('frequency', 'VARCHAR(20)', None),
+                    ('pre_close', 'REAL', None),
+                ],
+                't_stock_info': [
+                    ('stock_name', 'VARCHAR(100)', None),
+                    ('sec_id', 'VARCHAR(20)', None),
+                    ('sec_type1', 'INTEGER', None),
+                    ('sec_type2', 'INTEGER', None),
+                    ('board', 'INTEGER', None),
+                    ('exchange', 'VARCHAR(20)', None),
+                    ('sec_abbr', 'VARCHAR(50)', None),
+                    ('price_tick', 'REAL', None),
+                    ('trade_n', 'INTEGER', None),
+                    ('listed_date', 'DATE', None),
+                    ('delisted_date', 'DATE', None),
+                    ('delisting_begin_date', 'DATE', None),
+                    ('industry', 'VARCHAR(100)', None),
+                    ('market_cap', 'REAL', None),
+                ],
+                't_etf_info': [
+                    ('etf_name', 'TEXT', None),
+                    ('sec_id', 'VARCHAR(20)', None),
+                    ('sec_type1', 'INTEGER', None),
+                    ('sec_type2', 'INTEGER', None),
+                    ('board', 'INTEGER', None),
+                    ('exchange', 'VARCHAR(20)', None),
+                    ('sec_abbr', 'VARCHAR(50)', None),
+                    ('price_tick', 'REAL', None),
+                    ('trade_n', 'INTEGER', None),
+                    ('listed_date', 'DATE', None),
+                    ('delisted_date', 'DATE', None),
+                    ('fund_type', 'TEXT', None),
+                    ('benchmark_index', 'VARCHAR(20)', None),
+                    ('management_fee', 'REAL', None),
+                    ('custodian_fee', 'REAL', None),
+                    ('management_company', 'TEXT', None),
+                ],
+                't_index_info': [
+                    ('index_name', 'VARCHAR(100)', None),
+                    ('sec_id', 'VARCHAR(20)', None),
+                    ('sec_type1', 'INTEGER', None),
+                    ('sec_type2', 'INTEGER', None),
+                    ('board', 'INTEGER', None),
+                    ('exchange', 'VARCHAR(20)', None),
+                    ('sec_abbr', 'VARCHAR(50)', None),
+                    ('price_tick', 'REAL', None),
+                    ('trade_n', 'INTEGER', None),
+                    ('listed_date', 'DATE', None),
+                    ('delisted_date', 'DATE', None),
+                    ('base_date', 'DATE', None),
+                    ('base_point', 'REAL', None),
+                    ('publish_date', 'DATE', None),
+                ],
+                't_sector_info': [
+                    ('sector_name', 'TEXT', None),
+                    ('sec_id', 'VARCHAR(20)', None),
+                    ('sec_type1', 'INTEGER', None),
+                    ('sec_type2', 'INTEGER', None),
+                    ('board', 'INTEGER', None),
+                    ('exchange', 'VARCHAR(20)', None),
+                    ('sec_abbr', 'VARCHAR(50)', None),
+                ],
+                't_valuation_data': [
+                    ('pe_ttm', 'REAL', None),
+                    ('pe_lyr', 'REAL', None),
+                    ('pe_mrq', 'REAL', None),
+                    ('pe_1q', 'REAL', None),
+                    ('pe_2q', 'REAL', None),
+                    ('pe_3q', 'REAL', None),
+                    ('pe_ttm_cut', 'REAL', None),
+                    ('pe_lyr_cut', 'REAL', None),
+                    ('pe_mrq_cut', 'REAL', None),
+                    ('pe_1q_cut', 'REAL', None),
+                    ('pe_2q_cut', 'REAL', None),
+                    ('pe_3q_cut', 'REAL', None),
+                    ('pb_lyr', 'REAL', None),
+                    ('pb_lf', 'REAL', None),
+                    ('pb_mrq', 'REAL', None),
+                    ('pcf_ttm_oper', 'REAL', None),
+                    ('pcf_ttm_ncf', 'REAL', None),
+                    ('pcf_lyr_oper', 'REAL', None),
+                    ('pcf_lyr_ncf', 'REAL', None),
+                    ('ps_ttm', 'REAL', None),
+                    ('ps_lyr', 'REAL', None),
+                    ('ps_mrq', 'REAL', None),
+                    ('ps_1q', 'REAL', None),
+                    ('ps_2q', 'REAL', None),
+                    ('ps_3q', 'REAL', None),
+                    ('peg_lyr', 'REAL', None),
+                    ('peg_1q', 'REAL', None),
+                    ('peg_2q', 'REAL', None),
+                    ('peg_3q', 'REAL', None),
+                    ('dy_ttm', 'REAL', None),
+                    ('dy_lfy', 'REAL', None),
+                    ('market_cap', 'REAL', None),
+                    ('circ_market_cap', 'REAL', None),
+                    ('total_share', 'REAL', None),
+                    ('float_share', 'REAL', None),
+                    ('total_mv', 'REAL', None),
+                    ('circ_mv', 'REAL', None),
+                ],
+            }
+
+            for table, columns in table_columns.items():
+                try:
+                    cursor.execute(f"PRAGMA table_info({table})")
+                    existing = {row[1] for row in cursor.fetchall()}
+                    if not existing:
+                        continue  # 表不存在，跳过
+                    for col_name, col_type, default_val in columns:
+                        if col_name not in existing:
+                            sql = f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"
+                            if default_val is not None:
+                                sql += f" DEFAULT {default_val}"
+                            try:
+                                cursor.execute(sql)
+                                logger.info(f"为 {table} 补全列: {col_name}")
+                            except sqlite3.OperationalError as e:
+                                logger.debug(f"为 {table} 补列 {col_name} 失败(可能已存在): {e}")
+                except sqlite3.OperationalError:
+                    pass
 
             logger.info(f"数据库初始化完成: {self.db_path}")
 
     # ============ 股票日频数据操作 ============
 
-    def _filter_simulated(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        过滤掉 is_simulated=True 的模拟数据行（飞书"模拟数据绝不写入数据库"原则）
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            待过滤数据
-
-        Returns
-        -------
-        pd.DataFrame
-            过滤后的数据（已去除 is_simulated=True 行）
-        """
-        if df.empty:
-            return df
-        if 'is_simulated' in df.columns:
-            mask = df['is_simulated'].astype(str).str.lower().isin(['true', '1', 'yes'])
-            n_filtered = int(mask.sum())
-            if n_filtered > 0:
-                logger.warning(
-                    f"过滤掉 {n_filtered} 行模拟数据 (is_simulated=True)，遵循飞书原则：模拟数据绝不写入数据库"
-                )
-            return df[~mask].copy()
-        return df
-
     def insert_stock_daily(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
-        """
-        批量插入股票日频数据
-
-        Returns
-        -------
-        int
-            插入的记录数
-        """
-        if df.empty:
-            return 0
-
-        # 过滤掉模拟数据（飞书"模拟数据绝不写入数据库"原则）
-        df = self._filter_simulated(df)
+        """批量插入股票日频数据 - 对齐东财 history 返回字段"""
         if df.empty:
             return 0
 
@@ -776,11 +1185,18 @@ class DatabaseManager:
         if 'trade_date' in df.columns:
             df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
 
+        # bob/eob 是 pandas Timestamp，需转为字符串
+        for col in ['bob', 'eob']:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notna(x) and hasattr(x, 'strftime') else (str(x) if pd.notna(x) else None)
+                )
+
         # 确保必要列存在
         for col in ['open', 'high', 'low', 'close', 'volume']:
             if col not in df.columns:
                 df[col] = 0.0
-        for col in ['amount', 'vwap', 'pre_close']:
+        for col in ['amount', 'vwap', 'pre_close', 'bob', 'eob', 'position', 'frequency']:
             if col not in df.columns:
                 df[col] = None
         if 'suspend_flag' not in df.columns:
@@ -796,15 +1212,17 @@ class DatabaseManager:
                 for _, row in batch.iterrows():
                     rows.append((
                         row.get('trade_date'), row.get('stock_code'),
+                        row.get('bob'), row.get('eob'),
                         row.get('open'), row.get('high'), row.get('low'),
                         row.get('close'), row.get('volume'),
-                        row.get('amount'), row.get('vwap'),
-                        row.get('pre_close'), row.get('suspend_flag')
+                        row.get('amount'), row.get('position'), row.get('frequency'),
+                        row.get('vwap'), row.get('pre_close'), row.get('suspend_flag')
                     ))
                 cursor.executemany('''
-                    INSERT OR REPLACE INTO stock_daily
-                    (trade_date, stock_code, open, high, low, close, volume, amount, vwap, pre_close, suspend_flag)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO t_stock_daily
+                    (trade_date, stock_code, bob, eob, open, high, low, close, volume,
+                     amount, position, frequency, vwap, pre_close, suspend_flag)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', rows)
                 count += len(rows)
 
@@ -825,9 +1243,9 @@ class DatabaseManager:
             for f in fields:
                 if f not in select_cols:
                     select_cols.append(f)
-            sql = f"SELECT {','.join(select_cols)} FROM stock_daily WHERE 1=1"
+            sql = f"SELECT {','.join(select_cols)} FROM t_stock_daily WHERE 1=1"
         else:
-            sql = 'SELECT * FROM stock_daily WHERE 1=1'
+            sql = 'SELECT * FROM t_stock_daily WHERE 1=1'
         params = []
 
         if stock_codes:
@@ -859,7 +1277,7 @@ class DatabaseManager:
         """获取股票基本信息（用于选股过滤：ST判断 + 新股判断）"""
         with self.get_connection() as conn:
             df = pd.read_sql_query(
-                'SELECT stock_code, stock_name, list_date FROM stock_info',
+                'SELECT stock_code, stock_name, list_date FROM t_stock_info',
                 conn
             )
         return df
@@ -867,7 +1285,7 @@ class DatabaseManager:
     # ============ 指数日频数据操作 ============
 
     def insert_index_daily(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
-        """批量插入指数日频数据"""
+        """批量插入指数日频数据 - 对齐东财 history 返回字段"""
         if df.empty:
             return 0
 
@@ -875,10 +1293,17 @@ class DatabaseManager:
         if 'trade_date' in df.columns:
             df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
 
+        # bob/eob 是 pandas Timestamp，需转为字符串
+        for col in ['bob', 'eob']:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notna(x) and hasattr(x, 'strftime') else (str(x) if pd.notna(x) else None)
+                )
+
         for col in ['open', 'high', 'low', 'close', 'volume']:
             if col not in df.columns:
                 df[col] = 0.0
-        for col in ['pre_close', 'amount']:
+        for col in ['pre_close', 'amount', 'bob', 'eob', 'position', 'frequency']:
             if col not in df.columns:
                 df[col] = None
 
@@ -892,14 +1317,17 @@ class DatabaseManager:
                 for _, row in batch.iterrows():
                     rows.append((
                         row.get('trade_date'), row.get('index_code'),
+                        row.get('bob'), row.get('eob'),
                         row.get('open'), row.get('high'), row.get('low'),
                         row.get('close'), row.get('volume'),
-                        row.get('pre_close'), row.get('amount')
+                        row.get('amount'), row.get('position'), row.get('frequency'),
+                        row.get('pre_close')
                     ))
                 cursor.executemany('''
-                    INSERT OR REPLACE INTO index_daily
-                    (trade_date, index_code, open, high, low, close, volume, pre_close, amount)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO t_index_daily
+                    (trade_date, index_code, bob, eob, open, high, low, close, volume,
+                     amount, position, frequency, pre_close)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', rows)
                 count += len(rows)
 
@@ -913,7 +1341,7 @@ class DatabaseManager:
         end_date: Optional[str] = None
     ) -> pd.DataFrame:
         """查询指数日频数据"""
-        sql = 'SELECT * FROM index_daily WHERE 1=1'
+        sql = 'SELECT * FROM t_index_daily WHERE 1=1'
         params = []
 
         if index_codes:
@@ -943,30 +1371,43 @@ class DatabaseManager:
     # ============ 股票信息操作 ============
 
     def insert_stock_info(self, df: pd.DataFrame) -> int:
-        """批量插入股票信息"""
+        """批量插入股票信息 - 对齐东财 get_symbol_infos 返回字段"""
         if df.empty:
             return 0
 
         df = df.copy()
-        if 'list_date' in df.columns:
-            # 处理无效日期（如空值、0000-00-00等）
-            def safe_parse_date(x):
-                if pd.isna(x) or x == '' or x == '0000-00-00' or str(x).startswith('0000'):
-                    return None
-                try:
-                    return pd.to_datetime(x).strftime('%Y-%m-%d')
-                except (ValueError, pd.errors.OutOfBoundsDatetime):
-                    return None
-            df['list_date'] = df['list_date'].apply(safe_parse_date)
 
-        for col in ['stock_name', 'industry', 'market_cap', 'list_date']:
+        # 日期字段安全解析
+        def safe_parse_date(x):
+            if pd.isna(x) or x == '' or x == '0000-00-00' or str(x).startswith('0000'):
+                return None
+            try:
+                return pd.to_datetime(x).strftime('%Y-%m-%d')
+            except (ValueError, pd.errors.OutOfBoundsDatetime):
+                return None
+
+        for date_col in ['listed_date', 'delisted_date', 'delisting_begin_date']:
+            if date_col in df.columns:
+                df[date_col] = df[date_col].apply(safe_parse_date)
+
+        # 兼容旧字段 list_date -> listed_date
+        if 'list_date' in df.columns and 'listed_date' not in df.columns:
+            df['listed_date'] = df['list_date'].apply(safe_parse_date)
+
+        # 确保必要列存在
+        for col in ['stock_code', 'stock_name']:
             if col not in df.columns:
                 df[col] = None
-        for col in ['exchange', 'product_type', 'float_volume', 'total_volume']:
+        # 东财 API 字段
+        for col in ['sec_id', 'sec_type1', 'sec_type2', 'board', 'exchange',
+                     'sec_abbr', 'price_tick', 'trade_n', 'listed_date',
+                     'delisted_date', 'delisting_begin_date']:
             if col not in df.columns:
                 df[col] = None
-        if 'instrument_status' not in df.columns:
-            df['instrument_status'] = 0
+        # 兼容旧字段
+        for col in ['industry', 'market_cap']:
+            if col not in df.columns:
+                df[col] = None
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -974,16 +1415,19 @@ class DatabaseManager:
             for _, row in df.iterrows():
                 rows.append((
                     row.get('stock_code'), row.get('stock_name'),
-                    row.get('industry'), row.get('market_cap'), row.get('list_date'),
-                    row.get('exchange'), row.get('product_type'),
-                    row.get('float_volume'), row.get('total_volume'),
-                    row.get('instrument_status')
+                    row.get('sec_id'), row.get('sec_type1'), row.get('sec_type2'),
+                    row.get('board'), row.get('exchange'), row.get('sec_abbr'),
+                    row.get('price_tick'), row.get('trade_n'), row.get('listed_date'),
+                    row.get('delisted_date'), row.get('delisting_begin_date'),
+                    row.get('industry'), row.get('market_cap'),
                 ))
             cursor.executemany('''
-                INSERT OR REPLACE INTO stock_info
-                (stock_code, stock_name, industry, market_cap, list_date,
-                 exchange, product_type, float_volume, total_volume, instrument_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO t_stock_info
+                (stock_code, stock_name, sec_id, sec_type1, sec_type2,
+                 board, exchange, sec_abbr, price_tick, trade_n,
+                 listed_date, delisted_date, delisting_begin_date,
+                 industry, market_cap)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', rows)
 
         logger.info(f"插入 {len(rows)} 条股票信息")
@@ -992,8 +1436,42 @@ class DatabaseManager:
     def get_stock_info(self) -> pd.DataFrame:
         """获取股票信息"""
         with self.get_connection() as conn:
-            df = pd.read_sql_query('SELECT * FROM stock_info', conn)
+            df = pd.read_sql_query('SELECT * FROM t_stock_info', conn)
         return df
+
+    def load_t_stock_pool(self, pool_id: int = None) -> pd.DataFrame:
+        """
+        加载股票池
+
+        Parameters
+        ----------
+        pool_id : int, optional
+            股票池ID，为空则返回全市场股票
+
+        Returns
+        -------
+        pd.DataFrame
+            股票代码列表
+        """
+        if pool_id is None:
+            # 全市场：从 t_stock_info 获取
+            return self.get_stock_info()
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # 检查股票池是否存在
+            cursor.execute('SELECT pool_name FROM t_stock_pool WHERE id = ?', (pool_id,))
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"股票池 {pool_id} 不存在")
+                return pd.DataFrame()
+
+            # 从 t_stock_in_stock_pool 获取成员
+            df = pd.read_sql_query(
+                'SELECT stock_code FROM t_stock_in_stock_pool WHERE pool_id = ?',
+                conn, params=(pool_id,),
+            )
+            return df
 
     # ============ 执行日志操作 ============
 
@@ -1171,14 +1649,131 @@ class DatabaseManager:
 
         return df
 
+    # ============ 交易日历操作 ============
+
+    def insert_trading_dates(self, dates: list, batch_size: int = 5000) -> int:
+        """
+        全量替换交易日历到 t_trading_date 表
+
+        先清空表，再批量插入。每次同步全量替换，确保与接口数据一致。
+
+        Parameters
+        ----------
+        dates : list
+            交易日列表，格式 'YYYY-MM-DD'
+
+        Returns
+        -------
+        int
+            插入的记录数
+        """
+        if not dates:
+            return 0
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # 全量替换：先清空再插入
+            cursor.execute('DELETE FROM t_trading_date')
+            count = 0
+            for i in range(0, len(dates), batch_size):
+                batch = dates[i:i + batch_size]
+                rows = [(d,) for d in batch]
+                cursor.executemany(
+                    'INSERT INTO t_trading_date (trade_date) VALUES (?)',
+                    rows,
+                )
+                count += len(rows)
+
+        logger.info(f"全量替换 {count} 条交易日历")
+        return count
+
+    # ============ 估值数据操作 ============
+
+    def insert_valuation_data(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入估值数据到 t_valuation_data 表 - 对齐东财 stk_get_daily_valuation_pt 返回字段"""
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        if 'trade_date' in df.columns:
+            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+
+        # 列名映射
+        col_map = {}
+        if 'symbol' in df.columns and 'stock_code' not in df.columns:
+            col_map['symbol'] = 'stock_code'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        for col in ['trade_date', 'stock_code']:
+            if col not in df.columns:
+                logger.warning(f"估值数据缺少必要列: {col}")
+                return 0
+        # 东财 API 字段（对齐 stk_get_daily_valuation_pt + stk_get_daily_mktvalue_pt）
+        for col in ['pe_ttm', 'pe_lyr', 'pe_mrq', 'pe_1q', 'pe_2q', 'pe_3q',
+                     'pe_ttm_cut', 'pe_lyr_cut', 'pe_mrq_cut',
+                     'pe_1q_cut', 'pe_2q_cut', 'pe_3q_cut',
+                     'pb_lyr', 'pb_lf', 'pb_mrq',
+                     'pcf_ttm_oper', 'pcf_ttm_ncf', 'pcf_lyr_oper', 'pcf_lyr_ncf',
+                     'ps_ttm', 'ps_lyr', 'ps_mrq', 'ps_1q', 'ps_2q', 'ps_3q',
+                     'peg_lyr', 'peg_1q', 'peg_2q', 'peg_3q',
+                     'dy_ttm', 'dy_lfy',
+                     'market_cap', 'circ_market_cap', 'total_share', 'float_share',
+                     'total_mv', 'circ_mv']:
+            if col not in df.columns:
+                df[col] = None
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('trade_date'), row.get('stock_code'),
+                        row.get('pe_ttm'), row.get('pe_lyr'), row.get('pe_mrq'),
+                        row.get('pe_1q'), row.get('pe_2q'), row.get('pe_3q'),
+                        row.get('pe_ttm_cut'), row.get('pe_lyr_cut'), row.get('pe_mrq_cut'),
+                        row.get('pe_1q_cut'), row.get('pe_2q_cut'), row.get('pe_3q_cut'),
+                        row.get('pb_lyr'), row.get('pb_lf'), row.get('pb_mrq'),
+                        row.get('pcf_ttm_oper'), row.get('pcf_ttm_ncf'),
+                        row.get('pcf_lyr_oper'), row.get('pcf_lyr_ncf'),
+                        row.get('ps_ttm'), row.get('ps_lyr'), row.get('ps_mrq'),
+                        row.get('ps_1q'), row.get('ps_2q'), row.get('ps_3q'),
+                        row.get('peg_lyr'), row.get('peg_1q'), row.get('peg_2q'), row.get('peg_3q'),
+                        row.get('dy_ttm'), row.get('dy_lfy'),
+                        row.get('market_cap'), row.get('circ_market_cap'),
+                        row.get('total_share'), row.get('float_share'),
+                        row.get('total_mv'), row.get('circ_mv'),
+                    ))
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO t_valuation_data
+                    (trade_date, stock_code, pe_ttm, pe_lyr, pe_mrq,
+                     pe_1q, pe_2q, pe_3q, pe_ttm_cut, pe_lyr_cut, pe_mrq_cut,
+                     pe_1q_cut, pe_2q_cut, pe_3q_cut,
+                     pb_lyr, pb_lf, pb_mrq,
+                     pcf_ttm_oper, pcf_ttm_ncf, pcf_lyr_oper, pcf_lyr_ncf,
+                     ps_ttm, ps_lyr, ps_mrq, ps_1q, ps_2q, ps_3q,
+                     peg_lyr, peg_1q, peg_2q, peg_3q,
+                     dy_ttm, dy_lfy,
+                     market_cap, circ_market_cap, total_share, float_share,
+                     total_mv, circ_mv)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条估值数据")
+        return count
+
     # ============ 工具方法 ============
 
     def get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
-        """获取交易日列表（从 trade_calendar 表查询）"""
+        """获取交易日列表（从 t_trading_date 表查询）"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT trade_date FROM trade_calendar
+                SELECT trade_date FROM t_trading_date
                 WHERE trade_date BETWEEN ? AND ?
                 ORDER BY trade_date
             ''', (start_date, end_date))
@@ -1189,7 +1784,7 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT DISTINCT stock_code FROM stock_daily
+                SELECT DISTINCT stock_code FROM t_stock_daily
                 WHERE trade_date = ?
             ''', (trade_date,))
             return [row['stock_code'] for row in cursor.fetchall()]
@@ -1201,24 +1796,24 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute('SELECT COUNT(*) as cnt, MIN(trade_date) as min_date, MAX(trade_date) as max_date FROM stock_daily')
+            cursor.execute('SELECT COUNT(*) as cnt, MIN(trade_date) as min_date, MAX(trade_date) as max_date FROM t_stock_daily')
             row = cursor.fetchone()
-            summary['stock_daily'] = {
+            summary['t_stock_daily'] = {
                 'count': row['cnt'],
                 'start_date': row['min_date'],
                 'end_date': row['max_date']
             }
 
-            cursor.execute('SELECT COUNT(*) as cnt, MIN(trade_date) as min_date, MAX(trade_date) as max_date FROM index_daily')
+            cursor.execute('SELECT COUNT(*) as cnt, MIN(trade_date) as min_date, MAX(trade_date) as max_date FROM t_index_daily')
             row = cursor.fetchone()
-            summary['index_daily'] = {
+            summary['t_index_daily'] = {
                 'count': row['cnt'],
                 'start_date': row['min_date'],
                 'end_date': row['max_date']
             }
 
-            cursor.execute('SELECT COUNT(*) as cnt FROM stock_info')
-            summary['stock_info'] = {'count': cursor.fetchone()['cnt']}
+            cursor.execute('SELECT COUNT(*) as cnt FROM t_stock_info')
+            summary['t_stock_info'] = {'count': cursor.fetchone()['cnt']}
 
             cursor.execute('SELECT COUNT(*) as cnt FROM execution_log')
             summary['execution_log'] = {'count': cursor.fetchone()['cnt']}
@@ -1226,8 +1821,8 @@ class DatabaseManager:
             cursor.execute('SELECT COUNT(*) as cnt FROM best_records')
             summary['best_records'] = {'count': cursor.fetchone()['cnt']}
 
-            cursor.execute('SELECT COUNT(*) as cnt FROM index_constituent')
-            summary['index_constituent'] = {'count': cursor.fetchone()['cnt']}
+            cursor.execute('SELECT COUNT(*) as cnt FROM t_stock_in_index')
+            summary['t_stock_in_index'] = {'count': cursor.fetchone()['cnt']}
 
             cursor.execute('SELECT COUNT(*) as cnt FROM portfolio_analysis')
             summary['portfolio_analysis'] = {'count': cursor.fetchone()['cnt']}
@@ -1235,11 +1830,8 @@ class DatabaseManager:
             cursor.execute('SELECT COUNT(*) as cnt FROM factor_exposure')
             summary['factor_exposure'] = {'count': cursor.fetchone()['cnt']}
 
-            cursor.execute('SELECT COUNT(*) as cnt FROM qmt_instrument')
-            summary['qmt_instrument'] = {'count': cursor.fetchone()['cnt']}
-
-            cursor.execute('SELECT COUNT(*) as cnt FROM data_sync_log')
-            summary['data_sync_log'] = {'count': cursor.fetchone()['cnt']}
+            cursor.execute('SELECT COUNT(*) as cnt FROM t_data_sync')
+            summary['t_data_sync'] = {'count': cursor.fetchone()['cnt']}
 
             cursor.execute('SELECT COUNT(*) as cnt FROM valuation_result')
             summary['valuation_result'] = {'count': cursor.fetchone()['cnt']}
@@ -1272,7 +1864,7 @@ class DatabaseManager:
                         row.get('weight'), row.get('market_cap'), row.get('pe_ratio'), row.get('pb_ratio')
                     ))
                 conn.cursor().executemany('''
-                    INSERT OR REPLACE INTO index_constituent
+                    INSERT OR REPLACE INTO t_stock_in_index
                     (index_code, stock_code, weight, market_cap, pe_ratio, pb_ratio)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', rows)
@@ -1288,7 +1880,7 @@ class DatabaseManager:
         """获取某指数/板块的成分股"""
         with self.get_connection() as conn:
             df = pd.read_sql_query('''
-                SELECT * FROM index_constituent
+                SELECT * FROM t_stock_in_index
                 WHERE index_code = ?
                 ORDER BY weight DESC
             ''', conn, params=[index_code])
@@ -1301,7 +1893,7 @@ class DatabaseManager:
         end_date: Optional[str] = None
     ) -> pd.DataFrame:
         """获取指数成分股数据（兼容旧接口，忽略日期参数）"""
-        sql = 'SELECT * FROM index_constituent WHERE index_code = ?'
+        sql = 'SELECT * FROM t_stock_in_index WHERE index_code = ?'
         params = [index_code]
 
         # 兼容：忽略日期参数（表已无 trade_date 列）
@@ -1311,6 +1903,346 @@ class DatabaseManager:
         with self.get_connection() as conn:
             df = pd.read_sql_query(sql, conn, params=params)
 
+        return df
+
+    # ============ ETF 数据操作 ============
+
+    def insert_etf_info(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入 ETF 基本信息到 t_etf_info 表 - 对齐东财 get_symbol_infos 返回字段"""
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        for col in ['etf_code', 'etf_name']:
+            if col not in df.columns:
+                if col == 'etf_code' and 'stock_code' in df.columns:
+                    df['etf_code'] = df['stock_code']
+                elif col == 'etf_code' and 'symbol' in df.columns:
+                    df['etf_code'] = df['symbol']
+                elif col == 'etf_name' and 'stock_name' in df.columns:
+                    df['etf_name'] = df['stock_name']
+                elif col == 'etf_name' and 'sec_name' in df.columns:
+                    df['etf_name'] = df['sec_name']
+                else:
+                    df[col] = None
+        # 东财 API 字段
+        for col in ['sec_id', 'sec_type1', 'sec_type2', 'board', 'exchange',
+                     'sec_abbr', 'price_tick', 'trade_n', 'listed_date', 'delisted_date']:
+            if col not in df.columns:
+                df[col] = None
+        # 兼容旧字段 list_date -> listed_date, delist_date -> delisted_date
+        if 'list_date' in df.columns and 'listed_date' not in df.columns:
+            df['listed_date'] = df['list_date']
+        if 'delist_date' in df.columns and 'delisted_date' not in df.columns:
+            df['delisted_date'] = df['delist_date']
+        # 转换 Timestamp 为字符串，SQLite 不支持 Timestamp 类型
+        for col in ['listed_date', 'delisted_date']:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else (str(x) if x is not None and str(x) != 'nan' else None)
+                )
+        # 扩展字段
+        for col in ['fund_type', 'benchmark_index', 'management_fee',
+                     'custodian_fee', 'management_company']:
+            if col not in df.columns:
+                df[col] = None
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('etf_code'), row.get('etf_name'),
+                        row.get('sec_id'), row.get('sec_type1'), row.get('sec_type2'),
+                        row.get('board'), row.get('exchange'), row.get('sec_abbr'),
+                        row.get('price_tick'), row.get('trade_n'),
+                        row.get('listed_date'), row.get('delisted_date'),
+                        row.get('fund_type'), row.get('benchmark_index'),
+                        row.get('management_fee'), row.get('custodian_fee'),
+                        row.get('management_company'),
+                    ))
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO t_etf_info
+                    (etf_code, etf_name, sec_id, sec_type1, sec_type2,
+                     board, exchange, sec_abbr, price_tick, trade_n,
+                     listed_date, delisted_date, fund_type, benchmark_index,
+                     management_fee, custodian_fee, management_company)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条 ETF 信息")
+        return count
+
+    def insert_etf_daily(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入 ETF 日频数据到 t_etf_daily 表 - 对齐东财 history 返回字段"""
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        if 'trade_date' in df.columns:
+            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+        if 'etf_code' not in df.columns and 'stock_code' in df.columns:
+            df['etf_code'] = df['stock_code']
+
+        # bob/eob 是 pandas Timestamp，需转为字符串
+        for col in ['bob', 'eob']:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notna(x) and hasattr(x, 'strftime') else (str(x) if pd.notna(x) else None)
+                )
+
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col not in df.columns:
+                df[col] = 0.0
+        for col in ['amount', 'pre_close', 'vwap', 'bob', 'eob', 'position', 'frequency']:
+            if col not in df.columns:
+                df[col] = None
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('trade_date'), row.get('etf_code'),
+                        row.get('bob'), row.get('eob'),
+                        row.get('open'), row.get('high'), row.get('low'), row.get('close'),
+                        row.get('volume'), row.get('amount'),
+                        row.get('position'), row.get('frequency'),
+                        row.get('pre_close'), row.get('vwap'),
+                    ))
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO t_etf_daily
+                    (trade_date, etf_code, bob, eob, open, high, low, close, volume,
+                     amount, position, frequency, pre_close, vwap)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条 ETF 日频数据")
+        return count
+
+    def get_etf_info(self) -> pd.DataFrame:
+        """获取 ETF 信息列表"""
+        with self.get_connection() as conn:
+            try:
+                df = pd.read_sql_query('SELECT * FROM t_etf_info', conn)
+            except Exception:
+                df = pd.DataFrame()
+        return df
+
+    def get_etf_daily(self, etf_code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """
+        获取 ETF 日线数据
+
+        Parameters
+        ----------
+        etf_code : str
+            ETF 代码
+        start_date : str, optional
+            起始日期 (YYYYMMDD)
+        end_date : str, optional
+            结束日期 (YYYYMMDD)
+        """
+        sql = 'SELECT * FROM t_etf_daily WHERE etf_code = ?'
+        params = [etf_code]
+        if start_date:
+            sql += ' AND trade_date >= ?'
+            params.append(start_date)
+        if end_date:
+            sql += ' AND trade_date <= ?'
+            params.append(end_date)
+        sql += ' ORDER BY trade_date'
+        with self.get_connection() as conn:
+            try:
+                df = pd.read_sql_query(sql, conn, params=params)
+            except Exception:
+                df = pd.DataFrame()
+        return df
+
+    # ============ 指数信息操作 ============
+
+    def insert_index_info(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入指数基本信息到 t_index_info 表 - 对齐东财 get_symbol_infos 返回字段"""
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        # 列名映射
+        col_map = {}
+        if 'symbol' in df.columns and 'index_code' not in df.columns:
+            col_map['symbol'] = 'index_code'
+        if 'sec_name' in df.columns and 'index_name' not in df.columns:
+            col_map['sec_name'] = 'index_name'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        for col in ['index_code', 'index_name']:
+            if col not in df.columns:
+                df[col] = None
+        # 东财 API 字段
+        for col in ['sec_id', 'sec_type1', 'sec_type2', 'board', 'exchange',
+                     'sec_abbr', 'price_tick', 'trade_n', 'listed_date', 'delisted_date']:
+            if col not in df.columns:
+                df[col] = None
+        # 扩展字段
+        for col in ['base_date', 'base_point', 'publish_date']:
+            if col not in df.columns:
+                df[col] = None
+        # 转换 Timestamp 为字符串，SQLite 不支持 Timestamp 类型
+        for col in ['listed_date', 'delisted_date', 'base_date', 'publish_date']:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else (str(x) if x is not None and str(x) != 'nan' else None)
+                )
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('index_code'), row.get('index_name'),
+                        row.get('sec_id'), row.get('sec_type1'), row.get('sec_type2'),
+                        row.get('board'), row.get('exchange'), row.get('sec_abbr'),
+                        row.get('price_tick'), row.get('trade_n'),
+                        row.get('listed_date'), row.get('delisted_date'),
+                        row.get('base_date'), row.get('base_point'), row.get('publish_date'),
+                    ))
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO t_index_info
+                    (index_code, index_name, sec_id, sec_type1, sec_type2,
+                     board, exchange, sec_abbr, price_tick, trade_n,
+                     listed_date, delisted_date, base_date, base_point, publish_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条指数信息")
+        return count
+
+    # ============ 板块信息操作 ============
+
+    def insert_sector_info(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入板块基本信息到 t_sector_info 表 - 对齐东财 get_symbol_infos 返回字段"""
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        # 列名映射
+        col_map = {}
+        if 'symbol' in df.columns and 'sector_code' not in df.columns:
+            col_map['symbol'] = 'sector_code'
+        if 'sec_name' in df.columns and 'sector_name' not in df.columns:
+            col_map['sec_name'] = 'sector_name'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        for col in ['sector_code', 'sector_name']:
+            if col not in df.columns:
+                df[col] = None
+        # 东财 API 字段
+        for col in ['sec_id', 'sec_type1', 'sec_type2', 'exchange', 'sec_abbr']:
+            if col not in df.columns:
+                df[col] = None
+        for col in ['sector_type', 'parent_sector']:
+            if col not in df.columns:
+                df[col] = None
+        if 'sector_type' not in df.columns or df['sector_type'].isna().all():
+            df['sector_type'] = '概念'
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('sector_code'), row.get('sector_name'),
+                        row.get('sec_id'), row.get('sec_type1'), row.get('sec_type2'),
+                        row.get('exchange'), row.get('sec_abbr'),
+                        row.get('sector_type'), row.get('parent_sector'),
+                    ))
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO t_sector_info
+                    (sector_code, sector_name, sec_id, sec_type1, sec_type2,
+                     exchange, sec_abbr, sector_type, parent_sector)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条板块信息")
+        return count
+
+    # ============ 板块数据操作 ============
+
+    def insert_sector_constituent(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入板块成分股数据"""
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        for col in ['in_date', 'out_date']:
+            if col not in df.columns:
+                df[col] = None
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            count = 0
+
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('sector_code'), row.get('stock_code'),
+                        row.get('in_date'), row.get('out_date')
+                    ))
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO t_stock_list_in_sector
+                    (sector_code, stock_code, in_date, out_date)
+                    VALUES (?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条板块成分股数据")
+        return count
+
+    def get_sector_info(self) -> pd.DataFrame:
+        """获取板块信息列表"""
+        with self.get_connection() as conn:
+            try:
+                df = pd.read_sql_query('SELECT * FROM t_sector_info', conn)
+            except Exception:
+                df = pd.DataFrame()
+        return df
+
+    def get_sector_constituent(self, sector_code: str) -> pd.DataFrame:
+        """
+        获取板块成分股
+
+        Parameters
+        ----------
+        sector_code : str
+            板块代码
+        """
+        with self.get_connection() as conn:
+            try:
+                df = pd.read_sql_query(
+                    'SELECT * FROM t_stock_list_in_sector WHERE sector_code = ?',
+                    conn, params=[sector_code],
+                )
+            except Exception:
+                df = pd.DataFrame()
         return df
 
     # ============ 组合分析结果操作 ============
@@ -1405,90 +2337,6 @@ class DatabaseManager:
         with self.get_connection() as conn:
             return pd.read_sql_query(sql, conn, params=params)
 
-    # ============ QMT合约信息操作 ============
-
-    def insert_qmt_instruments(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
-        """
-        批量插入QMT合约信息
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            合约信息DataFrame，需包含stock_code列
-
-        Returns
-        -------
-        int
-            插入的记录数
-        """
-        if df.empty:
-            return 0
-
-        df = df.copy()
-        for col in ['instrument_name', 'exchange_id', 'product_type', 'open_date',
-                     'pre_close', 'up_stop_price', 'down_stop_price',
-                     'float_volume', 'total_volume', 'price_tick']:
-            if col not in df.columns:
-                df[col] = None
-        if 'instrument_status' not in df.columns:
-            df['instrument_status'] = 0
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            count = 0
-
-            for i in range(0, len(df), batch_size):
-                batch = df.iloc[i:i + batch_size]
-                rows = []
-                for _, row in batch.iterrows():
-                    rows.append((
-                        row.get('stock_code'), row.get('instrument_name'),
-                        row.get('exchange_id'), row.get('product_type'),
-                        row.get('open_date'), row.get('pre_close'),
-                        row.get('up_stop_price'), row.get('down_stop_price'),
-                        row.get('float_volume'), row.get('total_volume'),
-                        row.get('price_tick'), row.get('instrument_status')
-                    ))
-                cursor.executemany('''
-                    INSERT OR REPLACE INTO qmt_instrument
-                    (stock_code, instrument_name, exchange_id, product_type,
-                     open_date, pre_close, up_stop_price, down_stop_price,
-                     float_volume, total_volume, price_tick, instrument_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', rows)
-                count += len(rows)
-
-        logger.info(f"插入 {count} 条QMT合约信息")
-        return count
-
-    def get_qmt_instruments(self, product_type: Optional[int] = None) -> pd.DataFrame:
-        """
-        查询QMT合约信息
-
-        Parameters
-        ----------
-        product_type : int, optional
-            产品类型筛选(1股票,2指数,3基金,4ETF)
-
-        Returns
-        -------
-        pd.DataFrame
-            合约信息
-        """
-        sql = 'SELECT * FROM qmt_instrument WHERE 1=1'
-        params = []
-
-        if product_type is not None:
-            sql += ' AND product_type = ?'
-            params.append(product_type)
-
-        sql += ' ORDER BY stock_code'
-
-        with self.get_connection() as conn:
-            df = pd.read_sql_query(sql, conn, params=params)
-
-        return df
-
     # ============ 数据同步日志操作 ============
 
     def insert_data_sync_log(
@@ -1532,7 +2380,7 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO data_sync_log
+                INSERT INTO t_data_sync
                 (sync_type, start_time, end_time, record_count, status, error_message, details)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (sync_type, start_time, end_time, record_count, status, error_message, details))
@@ -1561,7 +2409,7 @@ class DatabaseManager:
         pd.DataFrame
             同步日志
         """
-        sql = 'SELECT * FROM data_sync_log WHERE 1=1'
+        sql = 'SELECT * FROM t_data_sync WHERE 1=1'
         params = []
 
         if sync_type:
@@ -1927,26 +2775,39 @@ class DatabaseManager:
     # ============ 财务数据操作 ============
 
     def insert_financial_data(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
-        """
-        批量插入财务数据
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            财务数据，需包含 stock_code, report_date, table_name, data_json 列
-        batch_size : int
-            批量插入大小
-
-        Returns
-        -------
-        int
-            插入记录数
-        """
+        """批量插入财务主要指标数据 - 对齐东财 stk_get_finance_prime_pt 返回字段"""
         if df.empty:
             return 0
 
         df = df.copy()
-        for col in ['stock_code', 'report_date', 'table_name', 'data_json']:
+        # 列名映射
+        col_map = {}
+        if 'symbol' in df.columns and 'stock_code' not in df.columns:
+            col_map['symbol'] = 'stock_code'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        # 兼容旧字段 stat_date / report_date -> rpt_date
+        if 'rpt_date' not in df.columns:
+            for src in ['stat_date', 'report_date']:
+                if src in df.columns:
+                    df['rpt_date'] = df[src]
+                    break
+
+        # 确保必要列存在
+        for col in ['stock_code', 'rpt_date']:
+            if col not in df.columns:
+                df[col] = None
+        # 东财 stk_get_finance_prime_pt 完整字段（财务主要指标）
+        for col in ['pub_date',
+                     'eps_basic', 'eps_dil', 'eps_basic_cut', 'eps_dil_cut',
+                     'net_cf_oper_ps', 'bps_pcom_ps',
+                     'ttl_ast', 'ttl_liab', 'share_cptl',
+                     'ttl_inc_oper', 'inc_oper', 'oper_prof', 'ttl_prof',
+                     'ttl_eqy_pcom', 'net_prof_pcom', 'net_prof_pcom_cut',
+                     'roe', 'roe_weight_avg', 'roe_cut', 'roe_weight_avg_cut',
+                     'net_cf_oper', 'eps_yoy', 'inc_oper_yoy', 'ttl_inc_oper_yoy',
+                     'net_prof_pcom_yoy', 'bps_sh', 'net_asset', 'net_prof', 'net_prof_cut']:
             if col not in df.columns:
                 df[col] = None
 
@@ -1956,39 +2817,137 @@ class DatabaseManager:
                 batch = df.iloc[i:i + batch_size]
                 rows = []
                 for _, row in batch.iterrows():
-                    data_json = row.get('data_json')
-                    if isinstance(data_json, dict):
-                        data_json = json.dumps(data_json, ensure_ascii=False, default=str)
                     rows.append((
-                        row.get('stock_code'), row.get('report_date'),
-                        row.get('table_name'), data_json
+                        row.get('stock_code'), row.get('pub_date'), row.get('rpt_date'),
+                        row.get('eps_basic'), row.get('eps_dil'),
+                        row.get('eps_basic_cut'), row.get('eps_dil_cut'),
+                        row.get('net_cf_oper_ps'), row.get('bps_pcom_ps'),
+                        row.get('ttl_ast'), row.get('ttl_liab'), row.get('share_cptl'),
+                        row.get('ttl_inc_oper'), row.get('inc_oper'),
+                        row.get('oper_prof'), row.get('ttl_prof'),
+                        row.get('ttl_eqy_pcom'), row.get('net_prof_pcom'),
+                        row.get('net_prof_pcom_cut'),
+                        row.get('roe'), row.get('roe_weight_avg'),
+                        row.get('roe_cut'), row.get('roe_weight_avg_cut'),
+                        row.get('net_cf_oper'),
+                        row.get('eps_yoy'), row.get('inc_oper_yoy'),
+                        row.get('ttl_inc_oper_yoy'), row.get('net_prof_pcom_yoy'),
+                        row.get('bps_sh'), row.get('net_asset'),
+                        row.get('net_prof'), row.get('net_prof_cut'),
                     ))
                 conn.cursor().executemany('''
                     INSERT OR REPLACE INTO financial_data
-                    (stock_code, report_date, table_name, data_json)
-                    VALUES (?, ?, ?, ?)
+                    (stock_code, pub_date, rpt_date,
+                     eps_basic, eps_dil, eps_basic_cut, eps_dil_cut,
+                     net_cf_oper_ps, bps_pcom_ps,
+                     ttl_ast, ttl_liab, share_cptl,
+                     ttl_inc_oper, inc_oper, oper_prof, ttl_prof,
+                     ttl_eqy_pcom, net_prof_pcom, net_prof_pcom_cut,
+                     roe, roe_weight_avg, roe_cut, roe_weight_avg_cut,
+                     net_cf_oper, eps_yoy, inc_oper_yoy, ttl_inc_oper_yoy,
+                     net_prof_pcom_yoy, bps_sh, net_asset, net_prof, net_prof_cut)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', rows)
                 count += len(rows)
 
-        logger.info(f"插入 {count} 条财务数据")
+        logger.info(f"插入 {count} 条财务主要指标数据")
+        return count
+
+    def insert_dividend_data(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入除权除息数据到 t_dividend_date 表 - 对齐东财 stk_get_dividend 返回字段"""
+        if df is None or df.empty:
+            return 0
+
+        df = df.copy()
+        # 统一列名
+        col_map = {}
+        if 'symbol' in df.columns and 'stock_code' not in df.columns:
+            col_map['symbol'] = 'stock_code'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        # 确保必要列存在
+        for col in ['stock_code', 'ex_date']:
+            if col not in df.columns:
+                df[col] = None
+        # 东财 stk_get_dividend 返回字段
+        for col in ['pub_date', 'scheme_type', 'equity_reg_date',
+                     'cash_pay_date', 'share_acct_date', 'share_lst_date',
+                     'cash_af_tax', 'cash_bf_tax', 'bonus_ratio', 'convert_ratio',
+                     'base_date', 'base_share', 'dvd_target',
+                     # 兼容旧字段
+                     'dividend_type', 'per_cash_dividend', 'per_share_dividend',
+                     'per_share_conversion', 'transfer_ratio', 'bonus_ratio_ration',
+                     'allotment_ratio', 'allotment_price']:
+            if col not in df.columns:
+                df[col] = None
+        # 新旧字段映射：cash_bf_tax -> per_cash_dividend
+        if 'cash_bf_tax' in df.columns and df['per_cash_dividend'].isna().all():
+            df['per_cash_dividend'] = df['cash_bf_tax']
+        if 'bonus_ratio' in df.columns and df['per_share_dividend'].isna().all():
+            df['per_share_dividend'] = df['bonus_ratio']
+        if 'convert_ratio' in df.columns and df['per_share_conversion'].isna().all():
+            df['per_share_conversion'] = df['convert_ratio']
+
+        with self.get_connection() as conn:
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('stock_code', ''),
+                        row.get('ex_date', ''),
+                        row.get('pub_date'),
+                        row.get('dividend_type', 'cash'),
+                        row.get('scheme_type'),
+                        row.get('per_cash_dividend', 0),
+                        row.get('per_share_dividend', 0),
+                        row.get('per_share_conversion', 0),
+                        row.get('transfer_ratio', 0),
+                        row.get('bonus_ratio_ration', 0),
+                        row.get('allotment_ratio', 0),
+                        row.get('allotment_price', 0),
+                        row.get('equity_reg_date'),
+                        row.get('cash_pay_date'),
+                        row.get('share_acct_date'),
+                        row.get('share_lst_date'),
+                        row.get('cash_af_tax'),
+                        row.get('cash_bf_tax'),
+                        row.get('bonus_ratio'),
+                        row.get('convert_ratio'),
+                        row.get('base_date'),
+                        row.get('base_share'),
+                        row.get('dvd_target'),
+                    ))
+                conn.cursor().executemany('''
+                    INSERT OR REPLACE INTO t_dividend_date
+                    (stock_code, ex_date, pub_date, dividend_type, scheme_type,
+                     per_cash_dividend, per_share_dividend, per_share_conversion,
+                     transfer_ratio, bonus_ratio_ration, allotment_ratio, allotment_price,
+                     equity_reg_date, cash_pay_date, share_acct_date, share_lst_date,
+                     cash_af_tax, cash_bf_tax, bonus_ratio, convert_ratio,
+                     base_date, base_share, dvd_target)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条除权除息数据")
         return count
 
     def get_financial_data(
         self,
         stock_codes: Optional[List[str]] = None,
-        table_name: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        查询财务数据
+        查询财务主要指标数据
 
         Parameters
         ----------
         stock_codes : list, optional
             股票代码列表
-        table_name : str, optional
-            报表名称 (Balance/Income/CashFlow)
         start_date : str, optional
             开始日期
         end_date : str, optional
@@ -1997,7 +2956,7 @@ class DatabaseManager:
         Returns
         -------
         pd.DataFrame
-            财务数据
+            财务主要指标数据
         """
         sql = 'SELECT * FROM financial_data WHERE 1=1'
         params = []
@@ -2007,19 +2966,15 @@ class DatabaseManager:
             sql += f' AND stock_code IN ({placeholders})'
             params.extend(stock_codes)
 
-        if table_name:
-            sql += ' AND table_name = ?'
-            params.append(table_name)
-
         if start_date:
-            sql += ' AND report_date >= ?'
+            sql += ' AND rpt_date >= ?'
             params.append(start_date)
 
         if end_date:
-            sql += ' AND report_date <= ?'
+            sql += ' AND rpt_date <= ?'
             params.append(end_date)
 
-        sql += ' ORDER BY stock_code, report_date'
+        sql += ' ORDER BY stock_code, rpt_date'
 
         with self.get_connection() as conn:
             df = pd.read_sql_query(sql, conn, params=params)
@@ -2037,17 +2992,19 @@ class DatabaseManager:
         """清空所有数据（仅用于测试）"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            for table in ['stock_daily', 'index_daily', 'stock_info', 'execution_log', 'best_records',
-                          'index_constituent', 'portfolio_analysis', 'factor_exposure',
-                          'qmt_instrument', 'data_sync_log', 'valuation_result', 'valuation_summary',
-                          'factor_registry', 'financial_data', 'stock_pool', 'stock_pool_member',
-                          'trade_calendar']:
+            for table in ['t_stock_daily', 't_index_daily', 't_stock_info', 'execution_log', 'best_records',
+                          't_stock_in_index', 'portfolio_analysis', 'factor_exposure',
+                          't_data_sync', 'valuation_result', 'valuation_summary',
+                          'factor_registry', 'financial_data', 't_stock_pool', 't_stock_in_stock_pool',
+                          't_trading_date', 't_dividend_date', 't_etf_info', 't_etf_daily',
+                          't_sector_info', 't_stock_list_in_sector', 't_index_info',
+                          't_valuation_data']:
                 cursor.execute(f'DELETE FROM {table}')
             logger.info("已清空所有数据")
 
     # ============ 股票池操作 ============
 
-    def create_stock_pool(
+    def create_t_stock_pool(
         self,
         pool_name: str,
         pool_code: Optional[str] = None,
@@ -2074,7 +3031,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             try:
                 cursor.execute('''
-                    INSERT INTO stock_pool (pool_name, pool_code, description)
+                    INSERT INTO t_stock_pool (pool_name, pool_code, description)
                     VALUES (?, ?, ?)
                 ''', (pool_name, pool_code, description))
                 pool_id = cursor.lastrowid
@@ -2084,7 +3041,7 @@ class DatabaseManager:
                 logger.warning(f"股票池已存在: {pool_name}")
                 return -1
 
-    def delete_stock_pool(self, pool_name: str) -> bool:
+    def delete_t_stock_pool(self, pool_name: str) -> bool:
         """
         删除股票池及其所有成员
 
@@ -2100,15 +3057,15 @@ class DatabaseManager:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            cursor.execute('SELECT pool_id FROM t_stock_pool WHERE pool_name = ?', (pool_name,))
             row = cursor.fetchone()
             if not row:
                 logger.warning(f"股票池不存在: {pool_name}")
                 return False
 
             pool_id = row['pool_id']
-            cursor.execute('DELETE FROM stock_pool_member WHERE pool_id = ?', (pool_id,))
-            cursor.execute('DELETE FROM stock_pool WHERE pool_id = ?', (pool_id,))
+            cursor.execute('DELETE FROM t_stock_in_stock_pool WHERE pool_id = ?', (pool_id,))
+            cursor.execute('DELETE FROM t_stock_pool WHERE pool_id = ?', (pool_id,))
             logger.info(f"删除股票池: {pool_name}")
             return True
 
@@ -2126,8 +3083,8 @@ class DatabaseManager:
             cursor.execute('''
                 SELECT p.pool_name, p.pool_code, p.description, p.created_at,
                        COUNT(m.id) as member_count
-                FROM stock_pool p
-                LEFT JOIN stock_pool_member m ON p.pool_id = m.pool_id AND m.removed_date IS NULL
+                FROM t_stock_pool p
+                LEFT JOIN t_stock_in_stock_pool m ON p.pool_id = m.pool_id AND m.removed_date IS NULL
                 GROUP BY p.pool_id
                 ORDER BY p.created_at DESC
             ''')
@@ -2149,11 +3106,11 @@ class DatabaseManager:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            cursor.execute('SELECT * FROM t_stock_pool WHERE pool_name = ?', (pool_name,))
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def add_to_stock_pool(
+    def add_to_t_stock_pool(
         self,
         pool_name: str,
         stock_codes: List[str],
@@ -2181,7 +3138,7 @@ class DatabaseManager:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            cursor.execute('SELECT pool_id FROM t_stock_pool WHERE pool_name = ?', (pool_name,))
             row = cursor.fetchone()
             if not row:
                 logger.warning(f"股票池不存在: {pool_name}")
@@ -2192,7 +3149,7 @@ class DatabaseManager:
             for code in stock_codes:
                 try:
                     cursor.execute('''
-                        INSERT INTO stock_pool_member (pool_id, stock_code, added_date)
+                        INSERT INTO t_stock_in_stock_pool (pool_id, stock_code, added_date)
                         VALUES (?, ?, ?)
                     ''', (pool_id, code.strip(), added_date))
                     count += 1
@@ -2203,7 +3160,7 @@ class DatabaseManager:
             logger.info(f"向股票池 {pool_name} 添加 {count} 只股票")
             return count
 
-    def remove_from_stock_pool(
+    def remove_from_t_stock_pool(
         self,
         pool_name: str,
         stock_codes: List[str],
@@ -2231,7 +3188,7 @@ class DatabaseManager:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            cursor.execute('SELECT pool_id FROM t_stock_pool WHERE pool_name = ?', (pool_name,))
             row = cursor.fetchone()
             if not row:
                 return 0
@@ -2239,7 +3196,7 @@ class DatabaseManager:
             pool_id = row['pool_id']
             placeholders = ','.join(['?' for _ in stock_codes])
             cursor.execute(f'''
-                UPDATE stock_pool_member
+                UPDATE t_stock_in_stock_pool
                 SET removed_date = ?
                 WHERE pool_id = ? AND stock_code IN ({placeholders}) AND removed_date IS NULL
             ''', [removed_date, pool_id] + [c.strip() for c in stock_codes])
@@ -2271,7 +3228,7 @@ class DatabaseManager:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT pool_id FROM stock_pool WHERE pool_name = ?', (pool_name,))
+            cursor.execute('SELECT pool_id FROM t_stock_pool WHERE pool_name = ?', (pool_name,))
             row = cursor.fetchone()
             if not row:
                 return []
@@ -2280,7 +3237,7 @@ class DatabaseManager:
 
             if trade_date:
                 cursor.execute('''
-                    SELECT DISTINCT stock_code FROM stock_pool_member
+                    SELECT DISTINCT stock_code FROM t_stock_in_stock_pool
                     WHERE pool_id = ?
                       AND added_date <= ?
                       AND (removed_date IS NULL OR removed_date > ?)
@@ -2288,7 +3245,7 @@ class DatabaseManager:
                 ''', (pool_id, trade_date, trade_date))
             else:
                 cursor.execute('''
-                    SELECT DISTINCT stock_code FROM stock_pool_member
+                    SELECT DISTINCT stock_code FROM t_stock_in_stock_pool
                     WHERE pool_id = ? AND removed_date IS NULL
                     ORDER BY stock_code
                 ''', (pool_id,))
@@ -2329,13 +3286,13 @@ class DatabaseManager:
             description = f"从指数 {index_code} 导入，共 {len(stock_codes)} 只成分股"
 
         # 创建股票池
-        pool_id = self.create_stock_pool(pool_name, pool_code=index_code, description=description)
+        pool_id = self.create_t_stock_pool(pool_name, pool_code=index_code, description=description)
         if pool_id == -1:
             # 股票池已存在，直接添加成员
             pool_id = self.get_stock_pool_info(pool_name)['pool_id']
 
         # 添加成员
-        count = self.add_to_stock_pool(pool_name, stock_codes)
+        count = self.add_to_t_stock_pool(pool_name, stock_codes)
         return count
 
     def import_csv_as_pool(
@@ -2373,12 +3330,12 @@ class DatabaseManager:
         if description is None:
             description = f"从CSV导入 {csv_path}，共 {len(stock_codes)} 只股票"
 
-        pool_id = self.create_stock_pool(pool_name, description=description)
+        pool_id = self.create_t_stock_pool(pool_name, description=description)
         if pool_id == -1:
             # 已存在，直接添加
             pass
 
-        return self.add_to_stock_pool(pool_name, stock_codes)
+        return self.add_to_t_stock_pool(pool_name, stock_codes)
 
     # ============ 策略版本管理 ============
 

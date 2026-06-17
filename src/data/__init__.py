@@ -11,7 +11,7 @@ from .data_validator import DataValidator
 from .symbol_converter import SymbolConverter
 from .stock_info_provider import StockInfoProvider, DatabaseStockInfoProvider, EastmoneyStockInfoProvider
 
-# QMT 和东财掘金采用延迟导入，避免在不需要时加载 xtquant/gm
+# 东财掘金数据源采用延迟导入，避免在不需要时加载 gm
 # 使用时通过 from src.data.eastmoney_connector import EastmoneyConnector 按需导入
 
 __all__ = [

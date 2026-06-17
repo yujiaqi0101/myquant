@@ -1,276 +1,222 @@
 """
-strategy_best_perf 自动提炼模块
-================================
+策略最佳表现自动提炼
+====================
 
-实现 spec Task 11.6：
-- 从 quantlab_results 中找出每个 strategy 的最佳实验
-- 写入 strategy_best_perf 表
-- main.py 启动时调用 ensure_best_perf_fresh() 触发补算
-- CLI 端 `quantlab track --rebuild-best-perf` 手动重建
+从 quantlab_experiments + quantlab_results 中按 Sharpe 筛选最佳实验，
+写入 strategy_best_perf 表。
 
-设计要点：
-- best metric 默认按 sharpe 排序
-- 同一 strategy 多个实验时取 sharpe 最高者
-- best_experiment_id / best_source / best_value 等关键字段必填
-- 过期（last_updated 早于 quantlab_results 中最近一次写入）→ 重建
-- 缺失（strategy_best_perf 中无该 strategy_id）→ 补全
+支持：
+- update_strategy_best_perf(strategy_id) — 单策略更新
+- rebuild_all_best_perf() — 全表重建
+- list_missing_best_perf() — 找出缺失条目
+- ensure_best_perf_fresh() — 启动检查（补缺失 + 重建过期）
 """
-from __future__ import annotations
 
+import json
 import logging
-from typing import Optional, Dict, List, Any
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
-def _get_db(db_path: str):
-    """统一获取 DatabaseManager 实例。"""
-    from src.data.database import DatabaseManager
-    return DatabaseManager(db_path)
-
-
-def _list_strategies_with_results(db) -> List[str]:
+class BestPerfUpdater:
     """
-    列出 quantlab_results 中出现过的所有 strategy 名称。
+    策略最佳表现自动提炼器
 
-    Returns
-    -------
-    list[str]
-        策略名列表（去重，按字典序排序）
+    从 quantlab_experiments 和 quantlab_results 中筛选 Sharpe 最高的实验，
+    自动写入 strategy_best_perf 表。
     """
-    sql = """
-        SELECT DISTINCT e.strategy
-        FROM quantlab_experiments e
-        JOIN quantlab_results r ON r.experiment_id = e.id
-        ORDER BY e.strategy
-    """
-    with db.get_connection() as conn:
-        rows = conn.execute(sql).fetchall()
-    return [r["strategy"] for r in rows]
+
+    def __init__(self, db_manager):
+        """
+        Parameters
+        ----------
+        db_manager : DatabaseManager
+            数据库管理器实例
+        """
+        self.db = db_manager
+
+    def update_strategy_best_perf(self, strategy_id: str, version: str = 'latest') -> Optional[Dict]:
+        """
+        更新单个策略的最佳表现
+
+        从 quantlab_experiments + quantlab_results 中找 Sharpe 最高的实验，
+        写入 strategy_best_perf 表。
+
+        Parameters
+        ----------
+        strategy_id : str
+            策略ID
+        version : str
+            版本标签，默认 'latest'
+
+        Returns
+        -------
+        dict or None
+            最佳表现记录，如果无实验数据则返回 None
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # 查找该策略的所有实验
+            cursor.execute('''
+                SELECT e.id, e.strategy_name, e.created_at,
+                       r.sharpe_ratio, r.total_return, r.max_drawdown
+                FROM quantlab_experiments e
+                LEFT JOIN quantlab_results r ON e.id = r.experiment_id
+                WHERE e.strategy_name = ? AND r.sharpe_ratio IS NOT NULL
+                ORDER BY r.sharpe_ratio DESC
+                LIMIT 1
+            ''', (strategy_id,))
+
+            row = cursor.fetchone()
+            if not row:
+                logger.debug(f"策略 '{strategy_id}' 无实验数据")
+                return None
+
+            best = {
+                'strategy_id': strategy_id,
+                'version': version,
+                'best_sharpe': row[3],
+                'best_return': row[4],
+                'best_max_dd': row[5],
+                'best_experiment_id': str(row[0]),
+                'best_source': 'quantlab',
+                'last_updated': datetime.now().isoformat(),
+            }
+
+            # 写入 strategy_best_perf（INSERT OR REPLACE）
+            cursor.execute('''
+                INSERT OR REPLACE INTO strategy_best_perf
+                (strategy_id, version, best_sharpe, best_return, best_max_dd,
+                 best_experiment_id, best_source, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                best['strategy_id'], best['version'],
+                best['best_sharpe'], best['best_return'], best['best_max_dd'],
+                best['best_experiment_id'], best['best_source'], best['last_updated'],
+            ))
+
+            logger.info(f"策略 '{strategy_id}' 最佳表现已更新: Sharpe={best['best_sharpe']:.4f}")
+            return best
+
+    def rebuild_all_best_perf(self, version: str = 'latest') -> int:
+        """
+        全表重建：遍历所有有实验的策略，更新最佳表现
+
+        Returns
+        -------
+        int
+            更新的策略数量
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT DISTINCT strategy_name FROM quantlab_experiments')
+            strategy_names = [row[0] for row in cursor.fetchall()]
+
+        count = 0
+        for strategy_id in strategy_names:
+            result = self.update_strategy_best_perf(strategy_id, version)
+            if result:
+                count += 1
+
+        logger.info(f"全表重建完成: 更新了 {count} 个策略的最佳表现")
+        return count
+
+    def list_missing_best_perf(self) -> List[str]:
+        """
+        找出 strategy_best_perf 表中缺失的策略
+
+        Returns
+        -------
+        list of str
+            缺失的策略ID列表
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT DISTINCT e.strategy_name
+                FROM quantlab_experiments e
+                LEFT JOIN strategy_best_perf bp ON e.strategy_name = bp.strategy_id
+                WHERE bp.strategy_id IS NULL
+            ''')
+            missing = [row[0] for row in cursor.fetchall()]
+
+        return missing
+
+    def list_stale_best_perf(self, expire_after_seconds: int = 7 * 24 * 3600) -> List[str]:
+        """
+        找出过期的最佳表现记录
+
+        Parameters
+        ----------
+        expire_after_seconds : int
+            过期时间（秒），默认7天
+
+        Returns
+        -------
+        list of str
+            过期的策略ID列表
+        """
+        cutoff = (datetime.now() - timedelta(seconds=expire_after_seconds)).isoformat()
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT strategy_id FROM strategy_best_perf
+                WHERE last_updated < ?
+            ''', (cutoff,))
+            stale = [row[0] for row in cursor.fetchall()]
+
+        return stale
 
 
-def _find_best_experiment(db, strategy_name: str) -> Optional[Dict[str, Any]]:
+def ensure_best_perf_fresh(db_manager, expire_after_seconds: int = 7 * 24 * 3600) -> Dict:
     """
-    找某 strategy 的最佳实验（按 sharpe DESC）。
-
-    Returns
-    -------
-    dict 或 None
-        含 experiment_id / final_equity / total_return / sharpe /
-        max_drawdown / source 等字段
-    """
-    sql = """
-        SELECT e.id AS experiment_id, e.strategy,
-               r.final_equity, r.total_return, r.sharpe,
-               r.max_drawdown, r.trade_count, r.win_rate,
-               r.source
-        FROM quantlab_experiments e
-        JOIN quantlab_results r ON r.experiment_id = e.id
-        WHERE e.strategy = ?
-        ORDER BY r.sharpe DESC, r.total_return DESC
-        LIMIT 1
-    """
-    with db.get_connection() as conn:
-        row = conn.execute(sql, (strategy_name,)).fetchone()
-    if row is None:
-        return None
-    return dict(row)
-
-
-def _ensure_strategy_info(db, strategy_id: str, strategy_name: str) -> None:
-    """
-    确保 strategy_info 行存在（best_perf 表 FK 引用）。
-
-    best_perf.strategy_id REFERENCES strategy_info(strategy_id)。
-    """
-    sql = """
-        INSERT OR IGNORE INTO strategy_info
-            (strategy_id, strategy_name, description, applicable_scenario)
-        VALUES (?, ?, ?, ?)
-    """
-    with db.get_connection() as conn:
-        conn.execute(
-            sql,
-            (
-                strategy_id,
-                strategy_name,
-                f"策略 {strategy_name}（由 best_perf_updater 自动创建）",
-                "auto",
-            ),
-        )
-
-
-def update_strategy_best_perf(
-    db_path: str,
-    strategy_id: str,
-    strategy_name: Optional[str] = None,
-) -> bool:
-    """
-    为单个 strategy 更新 best_perf 记录。
+    启动检查：补全缺失条目 + 重建过期条目
 
     Parameters
     ----------
-    db_path : str
-        数据库路径
-    strategy_id : str
-        策略唯一 ID（即 strategy_name，按项目约定用 strategy 字段当主键）
-    strategy_name : str, optional
-        显示名，默认与 strategy_id 相同
-
-    Returns
-    -------
-    bool
-        True 表示成功写入，False 表示该 strategy 暂无 result
-    """
-    name = strategy_name or strategy_id
-    db = _get_db(db_path)
-    best = _find_best_experiment(db, name)
-    if best is None:
-        logger.debug(f"策略 {name} 无 result，跳过")
-        return False
-
-    _ensure_strategy_info(db, strategy_id, name)
-
-    sql = """
-        INSERT INTO strategy_best_perf
-            (strategy_id, best_experiment_id, best_source,
-             best_metric, best_value,
-             best_sharpe, best_max_drawdown, best_annual_return,
-             last_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(strategy_id) DO UPDATE SET
-            best_experiment_id = excluded.best_experiment_id,
-            best_source = excluded.best_source,
-            best_metric = excluded.best_metric,
-            best_value = excluded.best_value,
-            best_sharpe = excluded.best_sharpe,
-            best_max_drawdown = excluded.best_max_drawdown,
-            best_annual_return = excluded.best_annual_return,
-            last_updated = CURRENT_TIMESTAMP
-    """
-    with db.get_connection() as conn:
-        conn.execute(
-            sql,
-            (
-                strategy_id,
-                best["experiment_id"],
-                best.get("source") or "",
-                "sharpe",
-                float(best.get("sharpe") or 0),
-                float(best.get("sharpe") or 0),
-                float(best.get("max_drawdown") or 0),
-                float(best.get("total_return") or 0),
-            ),
-        )
-    logger.info(
-        f"[best_perf] {name} -> experiment_id={best['experiment_id']} "
-        f"sharpe={best.get('sharpe'):.4f}"
-    )
-    return True
-
-
-def rebuild_all_best_perf(db_path: str) -> Dict[str, int]:
-    """
-    重建全部 strategy 的 best_perf。
-
-    Returns
-    -------
-    dict
-        {"updated": int, "skipped": int, "total": int}
-    """
-    db = _get_db(db_path)
-    strategies = _list_strategies_with_results(db)
-    stats = {"updated": 0, "skipped": 0, "total": len(strategies)}
-    for s in strategies:
-        if update_strategy_best_perf(db_path, strategy_id=s, strategy_name=s):
-            stats["updated"] += 1
-        else:
-            stats["skipped"] += 1
-    return stats
-
-
-def list_missing_best_perf(db_path: str) -> List[str]:
-    """
-    列出 quantlab_results 中有结果但 strategy_best_perf 中无对应条目的 strategy。
-
-    Returns
-    -------
-    list[str]
-        缺失 best_perf 的 strategy 名称
-    """
-    db = _get_db(db_path)
-    sql = """
-        SELECT DISTINCT e.strategy
-        FROM quantlab_experiments e
-        JOIN quantlab_results r ON r.experiment_id = e.id
-        LEFT JOIN strategy_best_perf b ON b.strategy_id = e.strategy
-        WHERE b.strategy_id IS NULL
-        ORDER BY e.strategy
-    """
-    with db.get_connection() as conn:
-        rows = conn.execute(sql).fetchall()
-    return [r["strategy"] for r in rows]
-
-
-def ensure_best_perf_fresh(
-    db_path: str,
-    expire_after_seconds: int = 7 * 24 * 3600,
-) -> Dict[str, Any]:
-    """
-    启动检查：补全缺失条目 + 重建过期条目。
-
-    - 缺失：strategy 在 quantlab_results 中有结果但 strategy_best_perf 无对应行
-    - 过期：strategy_best_perf.last_updated 早于 expire_after_seconds 秒前
-
-    Parameters
-    ----------
-    db_path : str
+    db_manager : DatabaseManager
+        数据库管理器实例
     expire_after_seconds : int
-        过期阈值（默认 7 天）
+        过期时间（秒），默认7天
 
     Returns
     -------
     dict
-        {"missing_fixed": int, "stale_rebuilt": int, "skipped": int}
+        检查结果，包含 missing_count, stale_count, updated_count
     """
-    db = _get_db(db_path)
-    stats = {"missing_fixed": 0, "stale_rebuilt": 0, "skipped": 0}
+    updater = BestPerfUpdater(db_manager)
 
-    # 1) 缺失条目
-    for s in list_missing_best_perf(db_path):
-        if update_strategy_best_perf(db_path, strategy_id=s, strategy_name=s):
-            stats["missing_fixed"] += 1
-        else:
-            stats["skipped"] += 1
+    # 1. 补全缺失
+    missing = updater.list_missing_best_perf()
+    missing_count = len(missing)
 
-    # 2) 过期条目（last_updated 距今超过阈值）
-    sql = f"""
-        SELECT b.strategy_id
-        FROM strategy_best_perf b
-        WHERE (julianday('now') - julianday(b.last_updated)) * 86400 > ?
-    """
-    with db.get_connection() as conn:
-        stale_rows = conn.execute(sql, (float(expire_after_seconds),)).fetchall()
-    for r in stale_rows:
-        sid = r["strategy_id"]
-        if update_strategy_best_perf(db_path, strategy_id=sid, strategy_name=sid):
-            stats["stale_rebuilt"] += 1
-        else:
-            stats["skipped"] += 1
+    # 2. 重建过期
+    stale = updater.list_stale_best_perf(expire_after_seconds)
+    stale_count = len(stale)
 
-    if stats["missing_fixed"] or stats["stale_rebuilt"]:
-        logger.info(
-            f"[ensure_best_perf_fresh] "
-            f"missing_fixed={stats['missing_fixed']} "
-            f"stale_rebuilt={stats['stale_rebuilt']} "
-            f"skipped={stats['skipped']}"
-        )
-    return stats
+    # 3. 执行更新
+    updated_count = 0
+    all_to_update = set(missing + stale)
+    for strategy_id in all_to_update:
+        result = updater.update_strategy_best_perf(strategy_id)
+        if result:
+            updated_count += 1
 
+    result = {
+        'missing_count': missing_count,
+        'stale_count': stale_count,
+        'updated_count': updated_count,
+    }
 
-__all__ = [
-    "update_strategy_best_perf",
-    "rebuild_all_best_perf",
-    "list_missing_best_perf",
-    "ensure_best_perf_fresh",
-]
+    if updated_count > 0:
+        logger.info(f"策略最佳表现检查: 补全 {missing_count} 个缺失, 重建 {stale_count} 个过期, 共更新 {updated_count} 个")
+    else:
+        logger.info("策略最佳表现检查: 所有记录均为最新")
+
+    return result

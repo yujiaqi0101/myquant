@@ -225,7 +225,7 @@ class MultiFactorBacktester:
             with self.db.get_connection() as conn:
                 query = """
                     SELECT stock_code, SUM(amount) as total_amount
-                    FROM stock_daily
+                    FROM t_stock_daily
                     WHERE trade_date >= ? AND trade_date <= ?
                       AND amount IS NOT NULL AND amount > 0
                     GROUP BY stock_code

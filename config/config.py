@@ -36,7 +36,7 @@ def _load_credentials() -> dict:
     Returns
     -------
     dict
-        凭证字典，如 {"qmt": {"account": "...", ...}, "eastmoney": {"token": "..."}}
+        凭证字典，如 {"eastmoney": {"token": "..."}}
     """
     return _CONFIG.get("credentials", {})
 
@@ -45,7 +45,7 @@ def _load_credentials() -> dict:
 _CREDENTIALS = _load_credentials()
 
 
-def get_credentials(service: str = 'qmt') -> dict:
+def get_credentials(service: str = 'eastmoney') -> dict:
     """
     获取指定服务的凭证信息
 
@@ -54,7 +54,7 @@ def get_credentials(service: str = 'qmt') -> dict:
     Parameters
     ----------
     service : str
-        服务名称，如 'qmt', 'eastmoney'
+        服务名称，如 'eastmoney'
 
     Returns
     -------
@@ -62,13 +62,6 @@ def get_credentials(service: str = 'qmt') -> dict:
         该服务的凭证字典
     """
     creds = _CREDENTIALS.get(service, {})
-
-    if service == 'qmt':
-        # 环境变量优先
-        account = os.environ.get("QMT_ACCOUNT", creds.get("account", ""))
-        password = os.environ.get("QMT_PASSWORD", creds.get("password", ""))
-        qmt_path = os.environ.get("QMT_PATH", creds.get("path", ""))
-        return {"account": account, "password": password, "path": qmt_path}
 
     if service == 'eastmoney':
         # 东财掘金 token，环境变量优先
@@ -78,83 +71,85 @@ def get_credentials(service: str = 'qmt') -> dict:
     return creds
 
 # ============================================================
+# 数据模式配置（重要）
+# ============================================================
+# AQUANT_DATA_MODE 环境变量控制运行时数据行为
+# 可选值：
+#   - "test":  测试模式 - 优先从数据库读取市场数据，数据库为空时回退到模拟数据
+#              模拟数据（标的、K线等）绝不写入数据库，保证数据库干净可信任
+#              执行日志、分析结果等运行产出正常写入数据库
+#   - "real":  真实模式 - 所有市场数据只从数据库读取，数据库为空则报错退出
+#   - "auto":  自动检测（默认）- 行为同 test 模式
+#
+# 示例：
+#   Linux/Mac:  export AQUANT_DATA_MODE=test
+#   Windows:    set AQUANT_DATA_MODE=test
+#   Python:     os.environ['AQUANT_DATA_MODE'] = 'test'
+#
+DATA_MODE_CONFIG = {
+    "mode": os.environ.get("AQUANT_DATA_MODE", "auto"),  # 默认自动检测
+    "test_data_dir": str(PROJECT_ROOT / "data" / "test_data"),  # 测试数据目录
+}
+
+# 数据模式常量
+class DataMode:
+    TEST = "test"      # 测试数据模式
+    REAL = "real"      # 真实数据模式
+    AUTO = "auto"      # 自动检测模式
+
+# ============================================================
 # 数据源配置
 # ============================================================
-# 通过 config/config.json 的 data_source 字段按数据类型路由
-# 例：{"stock_daily": "qmt", "sector_constituents": "tdx", "dividend": "eastmoney"}
-# 与飞书"## 数据库"章节表格完全对齐：
-#   - 板块成分股来自 tdx
-#   - 其它大部分数据来自 eastmoney
-#   - 股票日线来自 qmt
-#
-# CLI 不再支持 --data-source 参数
-# 项目约定（hard constraints）：所有市场数据严格从数据库读取，
-# 数据库为空时回测直接报错退出，不允许回退到模拟数据。
-# AQUANT_DATA_MODE 模式已删除。
+# 通过 config/config.json 的 data_source.source 字段配置
+# CLI 命令：python main.py config --data-source eastmoney
+# 命令行参数 --data-source 可临时覆盖配置文件
 #
 
 # 数据源常量
 class DataSource:
     DATABASE = "database"      # 本地 SQLite 数据库
     EASTMONEY = "eastmoney"    # 东财掘金 API
-    QMT = "qmt"                # 国金 QMT
-    TDX = "tdx"                # 通达信
 
 
-# 默认数据源配置（与 config.example.json 一致）
-DEFAULT_DATA_SOURCE_CONFIG = {
-    "stock_daily": "qmt",
-    "stock_info": "eastmoney",
-    "etf_info": "eastmoney",
-    "etf_daily": "eastmoney",
-    "index_info": "eastmoney",
-    "index_constituents": "eastmoney",
-    "index_daily": "eastmoney",
-    "sector_info": "eastmoney",
-    "sector_constituents": "tdx",
-    "financial_data": "eastmoney",
-    "valuation_data": "eastmoney",
-    "trading_dates": "eastmoney",
-    "dividend": "eastmoney",
-}
-
-
-def get_data_source_config() -> dict:
+def get_data_source() -> str:
     """
-    获取数据源配置（按数据类型路由）
+    获取当前数据源
 
-    优先级：config.json > DEFAULT_DATA_SOURCE_CONFIG
-
-    Returns
-    -------
-    dict
-        数据源配置字典，键为数据类型，值为数据源名
-    """
-    file_cfg = _CONFIG.get("data_source", {})
-    if not isinstance(file_cfg, dict):
-        file_cfg = {}
-    # 合并默认配置（用户配置覆盖默认）
-    result = dict(DEFAULT_DATA_SOURCE_CONFIG)
-    result.update(file_cfg)
-    return result
-
-
-def get_data_source(data_type: str) -> str:
-    """
-    获取指定数据类型的数据源
-
-    Parameters
-    ----------
-    data_type : str
-        数据类型，如 'stock_daily', 'sector_constituents'
+    优先级：config.json > 默认值 'database'
 
     Returns
     -------
     str
-        数据源名（如 'eastmoney', 'qmt', 'tdx'），默认 'database'
+        数据源：'database' 或 'eastmoney'
     """
-    cfg = get_data_source_config()
-    return cfg.get(data_type, "database")
+    file_source = _CONFIG.get("data_source", {}).get("source")
+    if file_source:
+        return file_source
+    return "database"
+
+
+def get_data_source_for_type(data_type: str) -> str:
+    """
+    根据数据类型获取对应的数据源名称
+
+    从 config.json 的 data_source.routing 字段读取路由配置。
+    每种数据有自己的"最佳"数据源，如板块成分股走通达信。
+
+    Parameters
+    ----------
+    data_type : str
+        数据类型，如 'stock_daily', 'sector_constituents' 等
+
+    Returns
+    -------
+    str
+        数据源名称，如 'eastmoney', 'tdx' 等
+    """
+    routing = _CONFIG.get("data_source", {}).get("routing", {})
+    if data_type in routing:
+        return routing[data_type]
+    # 未配置的数据类型，回退到默认数据源
+    return get_data_source()
 
 # 东财掘金配置（token 从 config.json credentials 字段读取）
 EASTMONEY_CONFIG = {
@@ -170,39 +165,44 @@ EASTMONEY_CONFIG = {
 
 def get_data_mode() -> str:
     """
-    保留接口用于向后兼容。
+    获取当前数据模式
 
-    AQUANT_DATA_MODE 已删除，项目约定为 strict 模式（仅数据库）。
-    始终返回 "real" 以保持调用方代码兼容。
+    Returns
+    -------
+    str
+        数据模式：'test', 'real', 或 'auto'
     """
-    return "real"
-
+    return DATA_MODE_CONFIG["mode"]
 
 def is_test_mode() -> bool:
     """
-    是否为测试模式（允许回退模拟数据）。
+    判断是否为测试模式
 
-    AQUANT_DATA_MODE 已删除，本项目不允许回退模拟数据，
-    始终返回 False。
+    测试模式下：
+    - 优先从数据库读取市场数据
+    - 数据库为空时回退到模拟数据（CSV/程序生成）
+    - 模拟数据绝不写入数据库
+    - 执行日志、分析结果等运行产出正常写入数据库
+
+    Returns
+    -------
+    bool
+        是否为测试模式（test 或 auto 均返回 True）
     """
-    return False
-
+    mode = get_data_mode()
+    # test 和 auto 都允许回退模拟数据，只有 real 模式不允许
+    return mode != DataMode.REAL
 
 def is_real_mode() -> bool:
     """
-    判断是否使用真实数据模式。
+    判断是否使用真实数据模式
 
-    AQUANT_DATA_MODE 已删除，始终返回 True。
+    Returns
+    -------
+    bool
+        是否为真实数据模式
     """
-    return True
-
-
-# 兼容层：DataMode 类已删除，但保留常量供历史代码使用
-class DataMode:
-    """兼容 stub：DataMode 已废弃，AQUANT_DATA_MODE 删除后请勿再使用本类。"""
-    TEST = "test"
-    REAL = "real"
-    AUTO = "auto"
+    return not is_test_mode()
 
 # ============================================================
 # 目录配置
@@ -224,21 +224,6 @@ LOG_DIR = PROJECT_ROOT / "logs"
 DATABASE_CONFIG = {
     "type": "sqlite",  # sqlite 或 postgresql
     "path": str(DATA_DIR / "aquant.db"),
-}
-
-# 国金QMT配置
-_QMT_CREDS = get_credentials('qmt')
-QMT_CONFIG = {
-    "enabled": False,              # 是否启用QMT数据源
-    "account": _QMT_CREDS.get("account", ""),  # 从config.json或环境变量读取
-    "password": _QMT_CREDS.get("password", ""),  # 从config.json或环境变量读取
-    "path": _QMT_CREDS.get("path", ""),  # QMT安装目录下userdata_mini路径
-    "default_start_date": "20230101",  # 默认数据起始日期
-    "data_types": ["stock", "index", "etf", "fund"],  # 要同步的数据类型
-    "sync_on_startup": False,      # 启动时是否自动同步
-    "batch_size": 100,             # 批量写入大小
-    "reconnect_attempts": 3,       # 重连次数
-    "reconnect_interval": 5,       # 重连间隔（秒）
 }
 
 # 市场阶段识别配置
@@ -437,7 +422,7 @@ DEFAULT_TODOS = [
         "title": "基本面数据接入",
         "category": "数据层",
         "priority": "medium",
-        "status": "completed",  # 已通过QMT实现
+        "status": "completed",  # 已通过东财掘金实现
     },
     {
         "id": "DATA-003",
@@ -451,7 +436,7 @@ DEFAULT_TODOS = [
         "title": "获取指数/ETF真实持仓数据",
         "category": "数据层",
         "priority": "high",
-        "status": "completed",  # 已通过QMT实现
+        "status": "completed",  # 已通过东财掘金实现
     },
     {
         "id": "DATA-005",

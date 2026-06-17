@@ -150,7 +150,7 @@ def load_batch_data(db, start_date: str, end_date: str, chunk_size: int = 500000
         if f not in select_cols:
             select_cols.append(f)
 
-    sql = f"SELECT {','.join(select_cols)} FROM stock_daily WHERE trade_date >= ? AND trade_date <= ? ORDER BY trade_date, stock_code"
+    sql = f"SELECT {','.join(select_cols)} FROM t_stock_daily WHERE trade_date >= ? AND trade_date <= ? ORDER BY trade_date, stock_code"
 
     # 分块读取，避免一次性分配大数组导致 OOM
     chunks = []

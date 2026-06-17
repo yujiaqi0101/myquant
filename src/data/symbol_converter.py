@@ -23,67 +23,79 @@ class SymbolConverter:
     # 掘金前缀 -> 交易所后缀
     PREFIX_TO_SUFFIX = {v: k for k, v in SUFFIX_TO_PREFIX.items()}
 
+    # 纯数字代码 -> 交易所后缀的推断规则
+    @classmethod
+    def _infer_suffix(cls, code: str) -> str:
+        """根据纯数字代码推断交易所后缀"""
+        if code.startswith(('6', '9', '5')):
+            return 'SH'  # 上交所：6开头主板、9开头B股、5开头基金
+        elif code.startswith(('0', '3', '2')):
+            return 'SZ'  # 深交所：0开头主板、3开头创业板、2开头B股
+        else:
+            return 'SZ'  # 默认深交所
+
     @classmethod
     def to_eastmoney(cls, symbol: str) -> str:
         """
         系统内部格式 -> 掘金格式
 
-        Parameters
-        ----------
-        symbol : str
-            系统内部格式，如 '600000.SH'
-
-        Returns
-        -------
-        str
-            掘金格式，如 'SHSE.600000'
-
-        Raises
-        ------
-        ValueError
-            格式无效或未知的交易所后缀
+        支持三种输入格式：
+        - '600000.SH' (代码.后缀) -> 'SHSE.600000'
+        - '600000' (纯数字) -> 自动推断交易所 -> 'SHSE.600000'
+        - 'SHSE.600000' (已是掘金格式) -> 'SHSE.600000'
         """
         parts = symbol.split('.')
-        if len(parts) != 2:
-            raise ValueError(f"无效的系统内部 symbol 格式: {symbol}，期望格式: 代码.后缀")
-
-        code, suffix = parts
-        prefix = cls.SUFFIX_TO_PREFIX.get(suffix.upper())
-        if prefix is None:
-            raise ValueError(f"未知的交易所后缀: {suffix}，支持: {list(cls.SUFFIX_TO_PREFIX.keys())}")
-
-        return f"{prefix}.{code}"
+        if len(parts) == 2:
+            left, right = parts
+            # 判断是掘金格式 (SHSE.600000) 还是内部格式 (600000.SH)
+            if left.upper() in cls.PREFIX_TO_SUFFIX:
+                # 已经是掘金格式，直接返回
+                return f"{left.upper()}.{right}"
+            else:
+                # 内部格式: 代码.后缀
+                code, suffix = left, right
+                prefix = cls.SUFFIX_TO_PREFIX.get(suffix.upper())
+                if prefix is None:
+                    raise ValueError(f"未知的交易所后缀: {suffix}，支持: {list(cls.SUFFIX_TO_PREFIX.keys())}")
+                return f"{prefix}.{code}"
+        elif len(parts) == 1:
+            # 纯数字代码，自动推断交易所
+            code = parts[0]
+            suffix = cls._infer_suffix(code)
+            prefix = cls.SUFFIX_TO_PREFIX[suffix]
+            return f"{prefix}.{code}"
+        else:
+            raise ValueError(f"无效的 symbol 格式: {symbol}，期望格式: 代码.后缀 或 纯数字代码")
 
     @classmethod
     def to_internal(cls, symbol: str) -> str:
         """
         掘金格式 -> 系统内部格式
 
-        Parameters
-        ----------
-        symbol : str
-            掘金格式，如 'SHSE.600000'
-
-        Returns
-        -------
-        str
-            系统内部格式，如 '600000.SH'
-
-        Raises
-        ------
-        ValueError
-            格式无效或未知的掘金交易所前缀
+        支持三种输入格式：
+        - 'SHSE.600000' (掘金格式) -> '600000.SH'
+        - '600000.SH' (已是内部格式) -> '600000.SH'
+        - '600000' (纯数字) -> 自动推断交易所 -> '600000.SH'
         """
         parts = symbol.split('.')
-        if len(parts) != 2:
-            raise ValueError(f"无效的掘金 symbol 格式: {symbol}，期望格式: 前缀.代码")
-
-        prefix, code = parts
-        suffix = cls.PREFIX_TO_SUFFIX.get(prefix.upper())
-        if suffix is None:
-            raise ValueError(f"未知的掘金交易所前缀: {prefix}，支持: {list(cls.PREFIX_TO_SUFFIX.keys())}")
-
-        return f"{code}.{suffix}"
+        if len(parts) == 2:
+            left, right = parts
+            # 判断是掘金格式 (SHSE.600000) 还是内部格式 (600000.SH)
+            if left.upper() in cls.PREFIX_TO_SUFFIX:
+                # 掘金格式 -> 内部格式
+                prefix, code = left.upper(), right
+                suffix = cls.PREFIX_TO_SUFFIX[prefix]
+                return f"{code}.{suffix}"
+            else:
+                # 已经是内部格式，直接返回
+                return f"{left}.{right.upper()}"
+        elif len(parts) == 1:
+            # 纯数字代码，自动推断交易所
+            code = parts[0]
+            suffix = cls._infer_suffix(code)
+            return f"{code}.{suffix}"
+        else:
+            raise ValueError(f"无效的 symbol 格式: {symbol}")
 
     @classmethod
     def batch_to_eastmoney(cls, symbols: List[str]) -> List[str]:
