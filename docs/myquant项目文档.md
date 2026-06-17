@@ -375,13 +375,12 @@ K线图（含买卖点标记）
 
 
 
-## 数据模式与数据源分离，运行时控制台会明确显示当前模式和来源，避免混淆。
+## 数据源配置，回测/分析一律从数据库读取，缺数据直接报错退出。
 
-**数据行为模式**（`AQUANT_DATA_MODE` 环境变量）：
-
-**test**（默认）：优先从数据库读取，数据库为空时回退到CSV模拟数据。模拟数据不写入数据库。
-
-**real**：仅从数据库读取，数据库为空则报错退出。
+**数据来源**（通过 `config/config.json` → `data_source.source` / `data_source.routing` 配置）：
+- **database**：本地 SQLite 数据库
+- **eastmoney**：东财掘金 API（用于同步行情和因子数据）
+- 优先级：命令行 `--data-source` > `config.json` > 默认值 database
 
 
 

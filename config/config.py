@@ -71,38 +71,12 @@ def get_credentials(service: str = 'eastmoney') -> dict:
     return creds
 
 # ============================================================
-# 数据模式配置（重要）
-# ============================================================
-# AQUANT_DATA_MODE 环境变量控制运行时数据行为
-# 可选值：
-#   - "test":  测试模式 - 优先从数据库读取市场数据，数据库为空时回退到模拟数据
-#              模拟数据（标的、K线等）绝不写入数据库，保证数据库干净可信任
-#              执行日志、分析结果等运行产出正常写入数据库
-#   - "real":  真实模式 - 所有市场数据只从数据库读取，数据库为空则报错退出
-#   - "auto":  自动检测（默认）- 行为同 test 模式
-#
-# 示例：
-#   Linux/Mac:  export AQUANT_DATA_MODE=test
-#   Windows:    set AQUANT_DATA_MODE=test
-#   Python:     os.environ['AQUANT_DATA_MODE'] = 'test'
-#
-DATA_MODE_CONFIG = {
-    "mode": os.environ.get("AQUANT_DATA_MODE", "auto"),  # 默认自动检测
-    "test_data_dir": str(PROJECT_ROOT / "data" / "test_data"),  # 测试数据目录
-}
-
-# 数据模式常量
-class DataMode:
-    TEST = "test"      # 测试数据模式
-    REAL = "real"      # 真实数据模式
-    AUTO = "auto"      # 自动检测模式
-
-# ============================================================
 # 数据源配置
 # ============================================================
-# 通过 config/config.json 的 data_source.source 字段配置
+# 通过 config/config.json 的 data_source.source / data_source.routing 字段配置
 # CLI 命令：python main.py config --data-source eastmoney
 # 命令行参数 --data-source 可临时覆盖配置文件
+# 回测/分析一律从数据库读取，缺数据直接报错退出
 #
 
 # 数据源常量
@@ -162,47 +136,6 @@ EASTMONEY_CONFIG = {
     "retry_interval": 2.0,
     "cache_enabled": True,
 }
-
-def get_data_mode() -> str:
-    """
-    获取当前数据模式
-
-    Returns
-    -------
-    str
-        数据模式：'test', 'real', 或 'auto'
-    """
-    return DATA_MODE_CONFIG["mode"]
-
-def is_test_mode() -> bool:
-    """
-    判断是否为测试模式
-
-    测试模式下：
-    - 优先从数据库读取市场数据
-    - 数据库为空时回退到模拟数据（CSV/程序生成）
-    - 模拟数据绝不写入数据库
-    - 执行日志、分析结果等运行产出正常写入数据库
-
-    Returns
-    -------
-    bool
-        是否为测试模式（test 或 auto 均返回 True）
-    """
-    mode = get_data_mode()
-    # test 和 auto 都允许回退模拟数据，只有 real 模式不允许
-    return mode != DataMode.REAL
-
-def is_real_mode() -> bool:
-    """
-    判断是否使用真实数据模式
-
-    Returns
-    -------
-    bool
-        是否为真实数据模式
-    """
-    return not is_test_mode()
 
 # ============================================================
 # 目录配置

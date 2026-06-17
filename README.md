@@ -144,18 +144,12 @@
 - **日志级别**：支持 DEBUG/INFO/WARNING/ERROR 四级
 - **命令行控制**：`--log-level` 设置级别，`--no-log-file` 仅控制台输出
 
-### 🔀 数据模式与数据源分离
+### 🔀 数据源配置
 
-**数据行为模式**（`AQUANT_DATA_MODE` 环境变量）：
-- **test**（默认）：优先从数据库读取，数据库为空时回退到CSV模拟数据。模拟数据不写入数据库。
-- **real**：仅从数据库读取，数据库为空则报错退出。
-
-**数据来源**（通过 `config/config.json` → `data_source.source` 配置）：
-- **database**：本地 SQLite 数据库
-- **eastmoney**：东财掘金 API（实时获取行情和因子数据）
+**数据来源**（通过 `config/config.json` → `data_source.source` / `data_source.routing` 配置）：
+- **database**：本地 SQLite 数据库（回测/分析一律从此读取，缺数据直接报错退出）
+- **eastmoney**：东财掘金 API（用于同步行情和因子数据）
 - 优先级：命令行 `--data-source` > `config.json` > 默认值 database
-
-运行时控制台会明确显示当前模式和来源，避免混淆。
 
 ## 项目结构
 
@@ -289,18 +283,6 @@ pip install -r requirements.txt
 
 ### 2. 配置数据源
 
-**数据行为模式**（`AQUANT_DATA_MODE` 环境变量）：
-
-```bash
-# Linux/Mac
-export AQUANT_DATA_MODE=test   # 测试模式：优先数据库，为空则回退模拟数据
-export AQUANT_DATA_MODE=real   # 真实模式：仅数据库，为空则报错
-export AQUANT_DATA_MODE=auto   # 自动检测（默认，行为同test）
-
-# Windows
-set AQUANT_DATA_MODE=test
-```
-
 **数据来源**（推荐使用 `config.json` 持久化配置）：
 
 ```bash
@@ -327,28 +309,14 @@ python main.py --generate-test-data
 ### 4. 使用测试数据运行
 
 ```bash
-# 方式1：设置环境变量
-export AQUANT_DATA_MODE=test
-python main.py
-
-# 方式2：使用命令行参数
-python main.py --source test
+python main.py --generate-test-data   # 先在 data/test_data/ 生成测试数据
 ```
 
 ### 5. 使用真实数据运行
 
 ```bash
-# 方式1：设置环境变量
-export AQUANT_DATA_MODE=real
-python main.py
-
-# 方式2：使用命令行参数
-python main.py --source real
-
-# 方式3：使用QMT同步数据（账号密码从config/config.json读取）
-python main.py --sync --start-date 20230101
-# 或通过命令行指定账号密码
-# python main.py --sync --account 你的账号 --password 你的密码 --start-date 20230101
+python main.py data sync --start-date 20230101   # 先同步数据到数据库
+python main.py backtest -s small_cap             # 运行回测（从数据库读取）
 ```
 
 ### 6. 仅同步数据
@@ -423,7 +391,6 @@ python main.py pool --add tech --stocks 000001.SZ,600000.SH  # 添加股票
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--source` | 数据模式：test=测试模式 / real=真实模式 / database=同real / mock=模拟 | 根据环境变量AQUANT_DATA_MODE |
 | `--sync` | 仅同步数据 | False |
 | `--validate` | 仅校验数据完整性 | False |
 | `--generate-test-data` | 仅生成测试数据CSV | False |
@@ -546,28 +513,7 @@ set QMT_PATH=E:\国金QMT交易端模拟\userdata_mini
 
 ## 使用示例
 
-### 通过环境变量选择数据源
-
-```python
-import os
-os.environ['AQUANT_DATA_MODE'] = 'test'  # 或 'real'
-
-from src.data import DataLoader
-
-# 自动根据环境变量选择数据源
-loader = DataLoader.create()
-```
-
-### 明确使用测试数据
-
-```python
-from src.data import DataLoader
-
-loader = DataLoader.from_test_data()
-print(loader.get_stock_list())
-```
-
-### 明确使用真实数据
+### 从数据库读取（回测/分析）
 
 ```python
 from src.data import DataLoader
@@ -826,7 +772,6 @@ python main.py result --html reports/backtest_0010_2024-01-01_2024-12-31
 
 - **v0.4.1** (2025): 测试数据与真实数据分离
   - 测试数据不再写入数据库，改为CSV文件存储
-  - 新增 `AQUANT_DATA_MODE` 环境变量配置
   - 支持运行时切换测试/真实数据源
   - 清晰的模式指示和警告提示
   - 新增 `--generate-test-data` 命令行参数

@@ -22,11 +22,10 @@ python main.py backtest         # 执行回测
 python main.py result           # 查看结果
 python main.py pool             # 股票池管理
 
-# 数据模式切换
-python main.py --source test    # 测试模式（优先数据库，可回退模拟数据）
-python main.py --source real    # 真实模式（仅数据库，为空则报错）
-python main.py --sync           # 从QMT同步数据到本地数据库
+# 数据操作
+python main.py data sync      # 同步数据到本地数据库
 python main.py --validate       # 校验数据库数据完整性
+python main.py --generate-test-data  # 生成模拟数据CSV
 python main.py --generate-test-data  # 生成模拟测试数据CSV
 
 # 运行测试
@@ -39,12 +38,9 @@ flake8 src/
 black --check src/
 ```
 
-## 数据模式系统
+## 数据访问模式
 
-通过环境变量 `AQUANT_DATA_MODE` 或 `--source` 参数控制三种模式：
-- **test**（默认）：优先从SQLite数据库读取，数据库为空时回退到模拟CSV数据。模拟数据绝不写入数据库；执行日志、分析结果等运行产出正常写入。
-- **real**：仅从数据库读取，数据库为空则报错退出。
-- **auto**：行为与test模式相同。
+回测/分析一律从数据库读取，缺数据直接报错退出。数据同步通过 `config/config.json` 的 `data_source.routing` 路由到具体数据源（eastmoney/tdx 等）。
 
 ## 架构
 
