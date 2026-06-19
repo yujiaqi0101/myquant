@@ -1,3 +1,5 @@
+import inspect
+
 import pandas as pd
 
 from abc import ABC
@@ -25,6 +27,16 @@ class SignalStrategy(ABC):
     #   - VectorBT  : per-symbol entries / exits
     #   - BarEngine : PortfolioConstructor 接收 scores dict
     #                 → TargetPortfolio → List[Order]
+
+    @property
+    def params(self) -> dict:
+        """从实例属性自动构建参数字典（取 __init__ 参数名对应的属性值）"""
+        sig = inspect.signature(self.__init__)
+        return {
+            name: getattr(self, name)
+            for name in sig.parameters
+            if name != 'self' and hasattr(self, name)
+        }
 
     @abstractmethod
     def signal(

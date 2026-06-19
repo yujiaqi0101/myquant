@@ -146,6 +146,7 @@ def from_quantlab_db(
     stock_codes: Optional[List[str]] = None,
     fields: Optional[List[str]] = None,
     enrich_stock_info: bool = True,
+    db=None,
 ) -> Dict[str, pd.DataFrame]:
     """
     直接从 myquant SQLite 数据库读数据，转 quantlab Dict[symbol, DataFrame]。
@@ -172,7 +173,8 @@ def from_quantlab_db(
     """
     from src.data.database import DatabaseManager
 
-    db = DatabaseManager(db_path)
+    if db is None:
+        db = DatabaseManager(db_path)
     df = db.get_stock_daily(
         stock_codes=stock_codes,
         start_date=start_date,
@@ -200,6 +202,64 @@ def from_quantlab_db(
             # 转回 MultiIndex
             df["trade_date"] = pd.to_datetime(df["trade_date"])
             df = df.set_index(["trade_date", "stock_code"])
+
+    # ---- 合并估值数据（pb / circ_mv）按 trade_date + stock_code join + ffill ----
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        val_df = pd.read_sql_query(
+            "SELECT trade_date, stock_code, pb_mrq, circ_mv "
+            "FROM t_valuation_data "
+            "WHERE trade_date >= ? AND trade_date <= ?",
+            conn,
+            params=[start_date, end_date],
+        )
+        conn.close()
+        if not val_df.empty:
+            val_df.rename(columns={
+                "pb_mrq": "pb",
+                "circ_mv": "market_cap",
+            }, inplace=True)
+            val_df["trade_date"] = pd.to_datetime(val_df["trade_date"])
+            df = df.reset_index()
+            df = df.merge(val_df, on=["trade_date", "stock_code"], how="left")
+            # 按 stock_code 分组 ffill + bfill（估值数据可能只有部分日期有值）
+            df = df.sort_values(["stock_code", "trade_date"])
+            df[["pb", "market_cap"]] = df.groupby("stock_code")[["pb", "market_cap"]].ffill()
+            df[["pb", "market_cap"]] = df.groupby("stock_code")[["pb", "market_cap"]].bfill()
+            df = df.set_index(["trade_date", "stock_code"])
+    except Exception:
+        pass
+
+    # ---- 合并财务数据（roe / revenue_growth）取最近报告期 ----
+    # t_finance_prime 的 stock_code 格式是 SHSE.600000，需转换为 600000.SH
+    try:
+        fin_df = db.get_financial_data(stock_codes=stock_codes)
+        if fin_df is not None and not fin_df.empty:
+            # 代码格式转换：SHSE.600000 → 600000.SH, SZSE.000001 → 000001.SZ
+            def _convert_code(code):
+                if '.' in code:
+                    parts = code.split('.')
+                    if len(parts) == 2:
+                        exch, num = parts[0], parts[1]
+                        if exch == 'SHSE':
+                            return f'{num}.SH'
+                        elif exch == 'SZSE':
+                            return f'{num}.SZ'
+                        elif exch == 'BJSE':
+                            return f'{num}.BJ'
+                return code
+            fin_df = fin_df.copy()
+            fin_df['stock_code'] = fin_df['stock_code'].apply(_convert_code)
+            # 取每只股票最近一期的 roe 和 inc_oper_yoy
+            fin_latest = fin_df.sort_values("rpt_date").groupby("stock_code").last().reset_index()
+            fin_latest = fin_latest[["stock_code", "roe", "inc_oper_yoy"]].copy()
+            fin_latest.rename(columns={"inc_oper_yoy": "revenue_growth"}, inplace=True)
+            df = df.reset_index()
+            df = df.merge(fin_latest, on="stock_code", how="left")
+            df = df.set_index(["trade_date", "stock_code"])
+    except Exception:
+        pass
 
     return to_quantlab_dict(df)
 

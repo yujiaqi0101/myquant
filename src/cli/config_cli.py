@@ -45,16 +45,6 @@ def set_eastmoney_token(token: str) -> None:
     print(f"东财掘金 Token 已设置")
 
 
-def set_data_source(source: str) -> None:
-    """设置默认数据源"""
-    config = _load_config()
-    if 'data_source' not in config:
-        config['data_source'] = {}
-    config['data_source']['source'] = source
-    _save_config(config)
-    print(f"✓ 默认数据源已设置为: {source}")
-
-
 def set_log_level(level: str) -> None:
     """设置日志级别"""
     config = _load_config()
@@ -81,8 +71,6 @@ def show_config() -> None:
 
     # 配置信息
     config = _load_config()
-    if 'data_source' in config:
-        print(f"\n  默认数据源: {config['data_source'].get('source', '未设置')}")
 
     if 'logging' in config:
         print(f"  日志级别: {config['logging'].get('level', '未设置')}")
@@ -110,15 +98,6 @@ def _interactive_set_token():
         set_eastmoney_token(token)
 
 
-def _interactive_set_data_source():
-    print("\n--- 配置数据源 ---")
-    from .interactive import prompt_choice
-    options = ['eastmoney (东财掘金 API)', 'database (本地数据库)']
-    idx = prompt_choice("请选择默认数据源", options)
-    sources = ['eastmoney', 'database']
-    set_data_source(sources[idx])
-
-
 def _interactive_set_log_level():
     print("\n--- 配置日志级别 ---")
     from .interactive import prompt_choice
@@ -133,8 +112,7 @@ def run_config_interactive():
     menu = InteractiveMenu("配置管理")
     menu.add_option('1', '查看当前配置', _interactive_show_config)
     menu.add_option('2', '配置东财掘金 Token', _interactive_set_token)
-    menu.add_option('3', '配置数据源', _interactive_set_data_source)
-    menu.add_option('4', '配置日志级别', _interactive_set_log_level)
+    menu.add_option('3', '配置日志级别', _interactive_set_log_level)
     menu.run()
 
 
@@ -143,8 +121,6 @@ def run_config_interactive():
 def setup_config_parser(parser: argparse.ArgumentParser) -> None:
     """配置 config 子命令的参数"""
     parser.add_argument('--token', help='设置东财掘金 Token')
-    parser.add_argument('--data-source',
-                        help='设置默认数据源（eastmoney/database）')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                         help='设置日志级别')
     parser.add_argument('--show', action='store_true', help='显示当前配置')
@@ -155,7 +131,7 @@ def run_config_command(args) -> None:
     # 如果没有传任何参数，进入交互模式
     has_args = any([
         args.token,
-        args.data_source, args.log_level, args.show
+        args.log_level, args.show
     ])
 
     if not has_args:
@@ -168,9 +144,6 @@ def run_config_command(args) -> None:
 
     if args.token:
         set_eastmoney_token(args.token)
-
-    if args.data_source:
-        set_data_source(args.data_source)
 
     if args.log_level:
         set_log_level(args.log_level)

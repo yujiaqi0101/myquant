@@ -489,20 +489,21 @@ set QMT_PATH=E:\国金QMT交易端模拟\userdata_mini
 
 ### 数据同步流程
 
-系统会按以下顺序同步数据（13步）：
+系统会按以下顺序同步数据（14步）：
 1. 交易日历 → t_trading_date（全量同步1991至今，不受时间范围影响）
 2. 股票基本信息 → t_stock_info
-3. 股票日频数据 → t_stock_daily
-4. ETF基本信息 → t_etf_info
-5. ETF日频数据 → t_etf_daily
-6. 指数基本信息 → t_index_info
-7. 指数成分股 → t_stock_in_index
-8. 指数日频数据 → t_index_daily
-9. 板块基本信息 → t_sector_info
-10. 板块成分股 → t_stock_list_in_sector（通达信）
-11. 财务数据 → financial_data
-12. 估值数据 → t_valuation_data
-13. 除权除息 → t_dividend_date（当前账号无接口权限，已暂停同步）
+3. 申万行业分类 → t_stock_info.industry（从本地Excel更新）
+4. 股票日频数据 → t_stock_daily
+5. ETF基本信息 → t_etf_info
+6. ETF日频数据 → t_etf_daily
+7. 指数基本信息 → t_index_info
+8. 指数成分股 → t_stock_in_index
+9. 指数日频数据 → t_index_daily
+10. 板块基本信息 → t_sector_info
+11. 板块成分股 → t_stock_list_in_sector（通达信）
+12. 财务数据 → financial_data
+13. 估值数据 → t_valuation_data
+14. 除权除息 → t_dividend_date（当前账号无接口权限，已暂停同步）
 
 ### 数据校验
 

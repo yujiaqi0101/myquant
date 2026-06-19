@@ -1,7 +1,4 @@
 {
-  "data_source": {
-    "source": "database"
-  },
   "credentials": {
     "eastmoney": {
       "token": "your_token"

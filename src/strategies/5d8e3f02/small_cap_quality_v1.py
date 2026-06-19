@@ -10,7 +10,7 @@
 4. 股票池：全市场，剔除ST/退市/次新股
 5. 每日止损/止盈检查（8%/25%）
 
-数据来源：FactorService（东财掘金API）
+数据来源：FactorService（本地数据库）
 """
 
 import logging
@@ -64,9 +64,9 @@ class SmallCapQualityStrategy(BaseStrategy):
         all_dates = context.full_data.index.get_level_values(0).unique()
         self._trade_calendar = sorted([str(d)[:10] for d in all_dates])
 
-        # 初始化因子服务（基本面策略强制使用 eastmoney 数据源）
+        # 初始化因子服务（从本地数据库获取基本面数据）
         from src.factors.factor_service import FactorService
-        self._factor_service = FactorService(data_source='eastmoney')
+        self._factor_service = FactorService(data_source='database')
 
         # 初始化止损止盈检查器
         self._exit_checker = ExitChecker({

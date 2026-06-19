@@ -3,7 +3,7 @@
 ==============
 
 检查数据库中数据的完整性和一致性，发现缺失数据。
-支持多表检查：stock_daily / index_daily / etf_daily / financial_data 等。
+支持多表检查：stock_daily / index_daily / etf_daily / t_finance_prime 等。
 """
 
 import logging
@@ -27,7 +27,7 @@ class DataInspector:
         'stock_daily': ('t_stock_daily', 'stock_code', 'trade_date'),
         'index_daily': ('t_index_daily', 'index_code', 'trade_date'),
         'etf_daily': ('t_etf_daily', 'etf_code', 'trade_date'),
-        'financial_data': ('financial_data', 'stock_code', 'report_date'),
+        't_finance_prime': ('t_finance_prime', 'stock_code', 'rpt_date'),
     }
 
     def __init__(self, db_manager):

@@ -61,6 +61,11 @@ class TargetWeightExecution:
 
             price = prices[sym]
 
+            if price != price:
+
+                # 价格为 NaN（停牌/未上市）→ 跳过（NaN != NaN 是 True）
+                continue
+
             target_value = total_equity * target_w
 
             position = (

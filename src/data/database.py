@@ -218,6 +218,26 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_index ON t_stock_in_index(index_code)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_stock ON t_stock_in_index(stock_code)')
 
+            # 申万行业分类明细表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS t_stock_in_sw (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code VARCHAR(20) NOT NULL,
+                    industry_code VARCHAR(20),
+                    industry_l1 VARCHAR(50),
+                    industry_l2 VARCHAR(50),
+                    industry_l3 VARCHAR(50),
+                    exchange VARCHAR(10),
+                    stock_name VARCHAR(50),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(stock_code)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sw_stock ON t_stock_in_sw(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sw_l1 ON t_stock_in_sw(industry_l1)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sw_l2 ON t_stock_in_sw(industry_l2)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sw_l3 ON t_stock_in_sw(industry_l3)')
+
             # 组合分析结果表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS portfolio_analysis (
@@ -319,38 +339,38 @@ class DatabaseManager:
                 'ALTER TABLE t_sector_info ADD COLUMN sec_type2 INTEGER',
                 'ALTER TABLE t_sector_info ADD COLUMN exchange VARCHAR(20)',
                 'ALTER TABLE t_sector_info ADD COLUMN sec_abbr VARCHAR(50)',
-                # financial_data 新增字段（对齐东财 stk_get_finance_prime_pt 财务主要指标）
-                'ALTER TABLE financial_data ADD COLUMN pub_date DATE',
-                'ALTER TABLE financial_data ADD COLUMN rpt_date DATE',
-                'ALTER TABLE financial_data ADD COLUMN eps_basic REAL',
-                'ALTER TABLE financial_data ADD COLUMN eps_dil REAL',
-                'ALTER TABLE financial_data ADD COLUMN eps_basic_cut REAL',
-                'ALTER TABLE financial_data ADD COLUMN eps_dil_cut REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_cf_oper_ps REAL',
-                'ALTER TABLE financial_data ADD COLUMN bps_pcom_ps REAL',
-                'ALTER TABLE financial_data ADD COLUMN ttl_ast REAL',
-                'ALTER TABLE financial_data ADD COLUMN ttl_liab REAL',
-                'ALTER TABLE financial_data ADD COLUMN share_cptl REAL',
-                'ALTER TABLE financial_data ADD COLUMN ttl_inc_oper REAL',
-                'ALTER TABLE financial_data ADD COLUMN inc_oper REAL',
-                'ALTER TABLE financial_data ADD COLUMN oper_prof REAL',
-                'ALTER TABLE financial_data ADD COLUMN ttl_prof REAL',
-                'ALTER TABLE financial_data ADD COLUMN ttl_eqy_pcom REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_prof_pcom REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_prof_pcom_cut REAL',
-                'ALTER TABLE financial_data ADD COLUMN roe REAL',
-                'ALTER TABLE financial_data ADD COLUMN roe_weight_avg REAL',
-                'ALTER TABLE financial_data ADD COLUMN roe_cut REAL',
-                'ALTER TABLE financial_data ADD COLUMN roe_weight_avg_cut REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_cf_oper REAL',
-                'ALTER TABLE financial_data ADD COLUMN eps_yoy REAL',
-                'ALTER TABLE financial_data ADD COLUMN inc_oper_yoy REAL',
-                'ALTER TABLE financial_data ADD COLUMN ttl_inc_oper_yoy REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_prof_pcom_yoy REAL',
-                'ALTER TABLE financial_data ADD COLUMN bps_sh REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_asset REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_prof REAL',
-                'ALTER TABLE financial_data ADD COLUMN net_prof_cut REAL',
+                # t_finance_prime 新增字段（对齐东财 stk_get_finance_prime_pt 财务主要指标）
+                'ALTER TABLE t_finance_prime ADD COLUMN pub_date DATE',
+                'ALTER TABLE t_finance_prime ADD COLUMN rpt_date DATE',
+                'ALTER TABLE t_finance_prime ADD COLUMN eps_basic REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN eps_dil REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN eps_basic_cut REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN eps_dil_cut REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_cf_oper_ps REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN bps_pcom_ps REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN ttl_ast REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN ttl_liab REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN share_cptl REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN ttl_inc_oper REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN inc_oper REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN oper_prof REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN ttl_prof REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN ttl_eqy_pcom REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_prof_pcom REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_prof_pcom_cut REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN roe REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN roe_weight_avg REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN roe_cut REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN roe_weight_avg_cut REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_cf_oper REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN eps_yoy REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN inc_oper_yoy REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN ttl_inc_oper_yoy REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_prof_pcom_yoy REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN bps_sh REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_asset REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_prof REAL',
+                'ALTER TABLE t_finance_prime ADD COLUMN net_prof_cut REAL',
                 # t_valuation_data 新增字段（对齐东财 stk_get_daily_valuation_pt）
                 'ALTER TABLE t_valuation_data ADD COLUMN pe_mrq REAL',
                 'ALTER TABLE t_valuation_data ADD COLUMN pe_1q REAL',
@@ -420,10 +440,21 @@ class DatabaseManager:
                 except sqlite3.OperationalError:
                     pass  # 字段已存在，忽略
 
-            # ============ 迁移：重建 financial_data 表 ============
-            # 旧版 financial_data 表字段与当前"财务主要指标"不一致（旧版可能有 report_date
+            # ============ 迁移：旧表 financial_data 重命名为 t_finance_prime ============
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='financial_data'")
+            if cursor.fetchone():
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='t_finance_prime'")
+                if cursor.fetchone():
+                    # 新表已存在，删除旧表
+                    cursor.execute('DROP TABLE financial_data')
+                else:
+                    cursor.execute('ALTER TABLE financial_data RENAME TO t_finance_prime')
+                logger.info("旧表 financial_data 已重命名为 t_finance_prime")
+
+            # ============ 迁移：重建 t_finance_prime 表 ============
+            # 旧版 t_finance_prime 表字段与当前"财务主要指标"不一致（旧版可能有 report_date
             # 或财务衍生指标字段），需要重建为正确的财务主要指标字段结构
-            cursor.execute("PRAGMA table_info(financial_data)")
+            cursor.execute("PRAGMA table_info(t_finance_prime)")
             existing_cols = {row[1] for row in cursor.fetchall()}
             # 财务主要指标表应有的列
             expected_cols = {
@@ -452,9 +483,9 @@ class DatabaseManager:
                 or len(existing_cols - expected_cols) > 0
             )
             if needs_rebuild:
-                logger.info(f"检测到 financial_data 表结构需重建 (现有 {len(existing_cols)} 列)，正在迁移...")
+                logger.info(f"检测到 t_finance_prime 表结构需重建 (现有 {len(existing_cols)} 列)，正在迁移...")
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS financial_data_new (
+                    CREATE TABLE IF NOT EXISTS t_finance_prime_new (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         stock_code VARCHAR(20) NOT NULL,
                         pub_date DATE,
@@ -494,11 +525,11 @@ class DatabaseManager:
                     )
                 ''')
                 # 删除旧表，重命名新表（旧字段已不再兼容，不做数据迁移，下次运行时会重新拉取）
-                cursor.execute('DROP TABLE IF EXISTS financial_data')
-                cursor.execute('ALTER TABLE financial_data_new RENAME TO financial_data')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON financial_data(stock_code)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_data(rpt_date)')
-                logger.info("financial_data 表重建完成（财务主要指标字段）")
+                cursor.execute('DROP TABLE IF EXISTS t_finance_prime')
+                cursor.execute('ALTER TABLE t_finance_prime_new RENAME TO t_finance_prime')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON t_finance_prime(stock_code)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON t_finance_prime(rpt_date)')
+                logger.info("t_finance_prime 表重建完成（财务主要指标字段）")
 
             # ============ 新增表 ============
 
@@ -547,7 +578,7 @@ class DatabaseManager:
 
             # 财务主要指标表 - 对齐东财 stk_get_finance_prime_pt 返回字段
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS financial_data (
+                CREATE TABLE IF NOT EXISTS t_finance_prime (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     stock_code VARCHAR(20) NOT NULL,
                     pub_date DATE,
@@ -586,8 +617,31 @@ class DatabaseManager:
                     UNIQUE(stock_code, rpt_date)
                 )
             ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON financial_data(stock_code)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_data(rpt_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON t_finance_prime(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON t_finance_prime(rpt_date)')
+
+            # 每日市值指标表 - 对齐东财 stk_get_daily_mktvalue_pt 返回字段
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS t_stock_mktvalue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code VARCHAR(20) NOT NULL,
+                    trade_date DATE NOT NULL,
+                    tot_mv REAL,
+                    tot_mv_csrc REAL,
+                    a_mv REAL,
+                    a_mv_ex_ltd REAL,
+                    b_mv REAL,
+                    b_mv_ex_ltd REAL,
+                    ev REAL,
+                    ev_ex_curr REAL,
+                    ev_ebitda REAL,
+                    equity_value REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(stock_code, trade_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_mktvalue_code ON t_stock_mktvalue(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_mktvalue_date ON t_stock_mktvalue(trade_date)')
 
             # 估值结果表 - 各估值方法的结果
             cursor.execute('''
@@ -1905,6 +1959,73 @@ class DatabaseManager:
 
         return df
 
+    # ============ 申万行业分类操作 ============
+
+    def replace_stock_in_sw(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """
+        全量替换申万行业分类明细 → t_stock_in_sw
+
+        先 DELETE 全表，再批量 INSERT。
+        """
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM t_stock_in_sw')
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('stock_code'),
+                        row.get('industry_code'),
+                        row.get('industry_l1'),
+                        row.get('industry_l2'),
+                        row.get('industry_l3'),
+                        row.get('exchange'),
+                        row.get('stock_name'),
+                    ))
+                cursor.executemany('''
+                    INSERT INTO t_stock_in_sw
+                    (stock_code, industry_code, industry_l1, industry_l2, industry_l3, exchange, stock_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+            conn.commit()
+
+        logger.info(f"替换写入 {count} 条申万行业分类数据")
+        return count
+
+    def get_stock_in_sw(
+        self,
+        stock_codes: Optional[List[str]] = None,
+        industry_l1: Optional[str] = None,
+        industry_l2: Optional[str] = None,
+        industry_l3: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """查询申万行业分类明细"""
+        sql = 'SELECT * FROM t_stock_in_sw WHERE 1=1'
+        params = []
+        if stock_codes:
+            placeholders = ','.join(['?' for _ in stock_codes])
+            sql += f' AND stock_code IN ({placeholders})'
+            params.extend(stock_codes)
+        if industry_l1:
+            sql += ' AND industry_l1 = ?'
+            params.append(industry_l1)
+        if industry_l2:
+            sql += ' AND industry_l2 = ?'
+            params.append(industry_l2)
+        if industry_l3:
+            sql += ' AND industry_l3 = ?'
+            params.append(industry_l3)
+        with self.get_connection() as conn:
+            df = pd.read_sql_query(sql, conn, params=params)
+        return df
+
     # ============ ETF 数据操作 ============
 
     def insert_etf_info(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
@@ -2774,7 +2895,7 @@ class DatabaseManager:
 
     # ============ 财务数据操作 ============
 
-    def insert_financial_data(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+    def insert_t_finance_prime(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
         """批量插入财务主要指标数据 - 对齐东财 stk_get_finance_prime_pt 返回字段"""
         if df.empty:
             return 0
@@ -2836,7 +2957,7 @@ class DatabaseManager:
                         row.get('net_prof'), row.get('net_prof_cut'),
                     ))
                 conn.cursor().executemany('''
-                    INSERT OR REPLACE INTO financial_data
+                    INSERT OR REPLACE INTO t_finance_prime
                     (stock_code, pub_date, rpt_date,
                      eps_basic, eps_dil, eps_basic_cut, eps_dil_cut,
                      net_cf_oper_ps, bps_pcom_ps,
@@ -2935,7 +3056,7 @@ class DatabaseManager:
         logger.info(f"插入 {count} 条除权除息数据")
         return count
 
-    def get_financial_data(
+    def get_t_finance_prime(
         self,
         stock_codes: Optional[List[str]] = None,
         start_date: Optional[str] = None,
@@ -2958,7 +3079,7 @@ class DatabaseManager:
         pd.DataFrame
             财务主要指标数据
         """
-        sql = 'SELECT * FROM financial_data WHERE 1=1'
+        sql = 'SELECT * FROM t_finance_prime WHERE 1=1'
         params = []
 
         if stock_codes:
@@ -2981,6 +3102,79 @@ class DatabaseManager:
 
         return df
 
+    # ============ 每日市值指标操作 ============
+
+    def insert_stock_mktvalue(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入每日市值指标数据 → t_stock_mktvalue"""
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        col_map = {}
+        if 'symbol' in df.columns and 'stock_code' not in df.columns:
+            col_map['symbol'] = 'stock_code'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        for col in ['stock_code', 'trade_date']:
+            if col not in df.columns:
+                df[col] = None
+        for col in ['tot_mv', 'tot_mv_csrc', 'a_mv', 'a_mv_ex_ltd',
+                     'b_mv', 'b_mv_ex_ltd', 'ev', 'ev_ex_curr',
+                     'ev_ebitda', 'equity_value']:
+            if col not in df.columns:
+                df[col] = None
+
+        with self.get_connection() as conn:
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    rows.append((
+                        row.get('stock_code'), row.get('trade_date'),
+                        row.get('tot_mv'), row.get('tot_mv_csrc'),
+                        row.get('a_mv'), row.get('a_mv_ex_ltd'),
+                        row.get('b_mv'), row.get('b_mv_ex_ltd'),
+                        row.get('ev'), row.get('ev_ex_curr'),
+                        row.get('ev_ebitda'), row.get('equity_value'),
+                    ))
+                conn.cursor().executemany('''
+                    INSERT OR REPLACE INTO t_stock_mktvalue
+                    (stock_code, trade_date, tot_mv, tot_mv_csrc,
+                     a_mv, a_mv_ex_ltd, b_mv, b_mv_ex_ltd,
+                     ev, ev_ex_curr, ev_ebitda, equity_value)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条每日市值指标数据")
+        return count
+
+    def get_stock_mktvalue(
+        self,
+        stock_codes: Optional[List[str]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> pd.DataFrame:
+        """查询每日市值指标数据"""
+        sql = 'SELECT * FROM t_stock_mktvalue WHERE 1=1'
+        params = []
+        if stock_codes:
+            placeholders = ','.join(['?' for _ in stock_codes])
+            sql += f' AND stock_code IN ({placeholders})'
+            params.extend(stock_codes)
+        if start_date:
+            sql += ' AND trade_date >= ?'
+            params.append(start_date)
+        if end_date:
+            sql += ' AND trade_date <= ?'
+            params.append(end_date)
+        sql += ' ORDER BY stock_code, trade_date'
+        with self.get_connection() as conn:
+            df = pd.read_sql_query(sql, conn, params=params)
+        return df
+
     def clear_factor_registry(self):
         """清空因子注册表（谨慎使用）"""
         with self.get_connection() as conn:
@@ -2995,10 +3189,10 @@ class DatabaseManager:
             for table in ['t_stock_daily', 't_index_daily', 't_stock_info', 'execution_log', 'best_records',
                           't_stock_in_index', 'portfolio_analysis', 'factor_exposure',
                           't_data_sync', 'valuation_result', 'valuation_summary',
-                          'factor_registry', 'financial_data', 't_stock_pool', 't_stock_in_stock_pool',
+                          'factor_registry', 't_finance_prime', 't_stock_pool', 't_stock_in_stock_pool',
                           't_trading_date', 't_dividend_date', 't_etf_info', 't_etf_daily',
                           't_sector_info', 't_stock_list_in_sector', 't_index_info',
-                          't_valuation_data']:
+                          't_valuation_data', 't_stock_mktvalue']:
                 cursor.execute(f'DELETE FROM {table}')
             logger.info("已清空所有数据")
 

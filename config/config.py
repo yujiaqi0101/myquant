@@ -73,57 +73,8 @@ def get_credentials(service: str = 'eastmoney') -> dict:
 # ============================================================
 # 数据源配置
 # ============================================================
-# 通过 config/config.json 的 data_source.source / data_source.routing 字段配置
-# CLI 命令：python main.py config --data-source eastmoney
-# 命令行参数 --data-source 可临时覆盖配置文件
 # 回测/分析一律从数据库读取，缺数据直接报错退出
-#
-
-# 数据源常量
-class DataSource:
-    DATABASE = "database"      # 本地 SQLite 数据库
-    EASTMONEY = "eastmoney"    # 东财掘金 API
-
-
-def get_data_source() -> str:
-    """
-    获取当前数据源
-
-    优先级：config.json > 默认值 'database'
-
-    Returns
-    -------
-    str
-        数据源：'database' 或 'eastmoney'
-    """
-    file_source = _CONFIG.get("data_source", {}).get("source")
-    if file_source:
-        return file_source
-    return "database"
-
-
-def get_data_source_for_type(data_type: str) -> str:
-    """
-    根据数据类型获取对应的数据源名称
-
-    从 config.json 的 data_source.routing 字段读取路由配置。
-    每种数据有自己的"最佳"数据源，如板块成分股走通达信。
-
-    Parameters
-    ----------
-    data_type : str
-        数据类型，如 'stock_daily', 'sector_constituents' 等
-
-    Returns
-    -------
-    str
-        数据源名称，如 'eastmoney', 'tdx' 等
-    """
-    routing = _CONFIG.get("data_source", {}).get("routing", {})
-    if data_type in routing:
-        return routing[data_type]
-    # 未配置的数据类型，回退到默认数据源
-    return get_data_source()
+# 数据同步通过 SourceRegistry 的 DEFAULT_ROUTING 路由到具体数据源（固定，不可配置切换）
 
 # 东财掘金配置（token 从 config.json credentials 字段读取）
 EASTMONEY_CONFIG = {
@@ -268,22 +219,6 @@ ALERT_CONFIG = {
         "email": False,
         "wechat": False,
     },
-}
-
-# 可视化配置
-VISUALIZATION_CONFIG = {
-    # 颜色方案
-    "colors": {
-        "bull": "#FF4B4B",
-        "bear": "#4B9BFF",
-        "neutral": "#FFD93D",
-        "warning": "#FF6B6B",
-        "normal": "#6BCB77",
-    },
-    
-    # 图表配置
-    "chart_height": 600,
-    "chart_width": 800,
 }
 
 # 估值分析配置

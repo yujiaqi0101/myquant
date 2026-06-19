@@ -3,12 +3,11 @@
 ==============
 
 单例模式，管理所有数据源实例（懒加载）。
-根据 config/config.json 的 data_source.routing 字段按数据类型路由到对应数据源。
+按数据类型路由到固定数据源（DEFAULT_ROUTING，不可配置切换）。
 
 spec 规定：
-- 每种数据有自己的"最佳"数据源
+- 每种数据有自己的固定数据源
 - 板块成分股走通达信，其他走东财
-- 支持配置切换
 """
 
 import logging
@@ -31,6 +30,7 @@ DEFAULT_ROUTING = {
     'sector_info': 'tdx',
     'sector_constituents': 'tdx',
     'financial_data': 'eastmoney',
+    'daily_mktvalue': 'eastmoney',
     'valuation_data': 'eastmoney',
     'dividend_data': 'eastmoney',
     'trading_dates': 'eastmoney',
@@ -56,20 +56,8 @@ class SourceRegistry:
         if self._initialized:
             return
         self._sources: Dict[str, DataSource] = {}
-        self._routing: Dict[str, str] = routing or self._load_routing_from_config()
+        self._routing: Dict[str, str] = routing or DEFAULT_ROUTING.copy()
         self._initialized = True
-
-    @staticmethod
-    def _load_routing_from_config() -> Dict[str, str]:
-        """从 config.json 加载路由配置"""
-        try:
-            from config.config import _CONFIG
-            routing = _CONFIG.get('data_source', {}).get('routing', {})
-            if routing:
-                return routing
-        except Exception:
-            pass
-        return DEFAULT_ROUTING.copy()
 
     def register(self, name: str, source: DataSource) -> None:
         """注册数据源"""

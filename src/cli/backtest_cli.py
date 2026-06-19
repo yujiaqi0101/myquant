@@ -288,8 +288,7 @@ def setup_backtest_parser(parser: argparse.ArgumentParser):
         help='报告名称（默认自动生成）'
     )
 
-    # 数据源参数（已移除 --data-source，数据源统一从 config.json 读取）
-    # 数据源通过 config/config.json 的 data_source.routing 字段按数据类型路由
+    # 数据源统一从本地数据库读取
 
     # ===== Phase 4 新增：quantlab 引擎选择 =====
     parser.add_argument(
@@ -318,10 +317,9 @@ def load_price_data(
     end_date: str,
     stock_codes: List[str] = None,
     db_path: str = None,
-    data_source: str = None
 ) -> pd.DataFrame:
     """
-    加载价格数据 - 支持多数据源
+    从本地数据库加载价格数据
 
     Parameters
     ----------
@@ -332,42 +330,21 @@ def load_price_data(
     stock_codes : List[str], optional
         股票代码列表
     db_path : str, optional
-        数据库路径（database 数据源使用）
-    data_source : str, optional
-        数据源：'database' 或 'eastmoney'，默认从配置读取
+        数据库路径
 
     Returns
     -------
     pd.DataFrame
         价格数据
     """
-    from config.config import get_data_source, DataSource, DATABASE_CONFIG
-    from src.data.loader import DataLoader
+    from config.config import DATABASE_CONFIG
+    from src.data.database import DatabaseManager
 
-    source = data_source or get_data_source()
+    if db_path is None:
+        db_path = DATABASE_CONFIG.get("path", str(Path(__file__).parent.parent.parent / 'data' / 'aquant.db'))
 
-    if source == DataSource.EASTMONEY:
-        # 东财掘金数据源
-        print(f"  数据源: 东财掘金 API")
-        loader = DataLoader.from_eastmoney(
-            start_date=start_date,
-            end_date=end_date,
-            stock_codes=stock_codes,
-        )
-        return loader.get_price_data(
-            stock_codes=stock_codes,
-            start_date=start_date,
-            end_date=end_date
-        )
-    else:
-        # 本地数据库数据源（默认）
-        from src.data.database import DatabaseManager
-
-        if db_path is None:
-            db_path = DATABASE_CONFIG.get("path", str(Path(__file__).parent.parent.parent / 'data' / 'aquant.db'))
-
-        db = DatabaseManager(db_path)
-        return db.get_stock_daily(stock_codes=stock_codes, start_date=start_date, end_date=end_date)
+    db = DatabaseManager(db_path)
+    return db.get_stock_daily(stock_codes=stock_codes, start_date=start_date, end_date=end_date)
 
 
 def _resolve_engine_choice(strategy_name: str, requested: str) -> str:
@@ -509,44 +486,19 @@ def _run_myquant_backtest(args: argparse.Namespace):
         market_filter=market_filter,
     )
 
-    # 7. 确定股票范围和数据源
+    # 7. 确定股票范围
     stock_codes = None
     pool_name = None
-
-    # 优先使用 CLI 参数，其次环境变量/配置
-    from config.config import get_data_source, DataSource
-    source = args.data_source or get_data_source()
 
     if args.pool and args.stocks:
         print("错误：--pool 和 --stocks 不能同时使用")
         return
 
     if args.pool:
-        # 从本地数据库获取股票池（所有数据源统一使用数据库中的股票池定义）
+        # 从本地数据库获取股票池
         from src.data.database import DatabaseManager
         db = DatabaseManager(_get_db_path())
         stock_codes = db.get_stock_pool_members(args.pool)
-        
-        # 如果数据库中没有，且是 eastmoney 数据源，尝试从 API 获取指数成分股
-        if not stock_codes and source == DataSource.EASTMONEY:
-            from config.config import get_credentials
-            from src.data.eastmoney_connector import EastmoneyConnector
-
-            token = get_credentials('eastmoney').get('token', '')
-            connector = EastmoneyConnector(token=token)
-            # 将股票池名称映射到指数代码（如 'test' -> '000300.SH'）
-            pool_to_index = {
-                'test': '000300.SH',  # 沪深300
-                '沪深300': '000300.SH',
-                'csi300': '000300.SH',
-                'csi500': '000905.SH',
-                'sse50': '000016.SH',
-            }
-            index_code = pool_to_index.get(args.pool, args.pool)
-            try:
-                stock_codes = connector.get_index_constituents(index_code, args.start_date)
-            except Exception as e:
-                logger.warning(f"从API获取指数成分股失败: {e}")
 
         if not stock_codes:
             print(f"错误：股票池 '{args.pool}' 不存在或为空")
@@ -568,8 +520,8 @@ def _run_myquant_backtest(args: argparse.Namespace):
     elif stock_codes:
         print(f"  股票列表: {len(stock_codes)} 只")
     
-    # 加载完整数据（预热期+回测期）
-    full_data = load_price_data(warmup_start, args.end_date, stock_codes=stock_codes, data_source=source)
+    # 加载完整数据（预热期+回测期，从本地数据库）
+    full_data = load_price_data(warmup_start, args.end_date, stock_codes=stock_codes)
     
     # 分离预热期和回测期数据
     warmup_data = full_data[full_data.index.get_level_values('trade_date') < args.start_date]
@@ -577,20 +529,9 @@ def _run_myquant_backtest(args: argparse.Namespace):
     
     print(f"  加载完成: {len(full_data)} 条记录")
 
-    # 8. 设置 stock_info_provider（数据加载后）
-    from src.data.stock_info_provider import DatabaseStockInfoProvider, EastmoneyStockInfoProvider
-    if source == DataSource.EASTMONEY:
-        # 使用已加载的 eastmoney adapter（通过 DataLoader 缓存）
-        # 避免重复创建，直接新建一个 provider 指向相同的 adapter
-        from src.data.eastmoney_adapter import EastmoneyAdapter
-        from config.config import get_credentials
-        token = get_credentials('eastmoney').get('token', '')
-        adapter = EastmoneyAdapter(token=token)
-        # 只加载股票列表（不重复加载价格数据）
-        adapter.load_stock_list()
-        engine._stock_info_provider = EastmoneyStockInfoProvider(adapter)
-    else:
-        engine._stock_info_provider = DatabaseStockInfoProvider(_get_db_path())
+    # 8. 设置 stock_info_provider（从本地数据库）
+    from src.data.stock_info_provider import DatabaseStockInfoProvider
+    engine._stock_info_provider = DatabaseStockInfoProvider(_get_db_path())
 
     # 9. 运行回测
     print(f"\n开始回测...")
@@ -826,6 +767,10 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
         SignalStrategyRegistry,
     )
     from src.quantlab_extras import build_ashare_risk_manager
+    from src.data.database import DatabaseManager
+
+    # 统一创建一个 DatabaseManager 实例复用
+    db = DatabaseManager(_get_db_path())
 
     # 1) 取策略类
     strategy_class = SignalStrategyRegistry.get(args.strategy)
@@ -849,8 +794,6 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
         return
 
     if args.pool:
-        from src.data.database import DatabaseManager
-        db = DatabaseManager(_get_db_path())
         stock_codes = db.get_stock_pool_members(args.pool)
         if not stock_codes:
             print(f"错误：股票池 '{args.pool}' 不存在或为空")
@@ -862,7 +805,7 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
 
     # 4) 回测前数据完整性检查
     from src.data.inspector import DataInspector
-    inspector = DataInspector(_get_db_path())
+    inspector = DataInspector(db)
     inspect_report = inspector.inspect(
         start_date=args.start_date,
         end_date=args.end_date,
@@ -901,12 +844,23 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
         start_date=warmup_start,
         end_date=args.end_date,
         stock_codes=stock_codes,
+        db=db,
     )
     print(f"  加载完成: {len(data)} 个 symbol, 耗时 {time.time() - t0:.1f}s")
 
     if not data:
         print("错误：未加载到任何数据，请检查日期范围与股票池")
         return
+
+    # 对齐所有 symbol 到统一交易日历（不同股票上市时间/停牌不同，长度可能不一致）
+    all_indices = [df.index for df in data.values()]
+    common_index = all_indices[0]
+    for idx in all_indices[1:]:
+        common_index = common_index.union(idx)
+    common_index = common_index.sort_values()
+    data = {
+        sym: df.reindex(common_index) for sym, df in data.items()
+    }
 
     # 5) 构造引擎
     engine = _build_quantlab_engine(
@@ -933,9 +887,6 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
     )
 
     # 8) 写库 + 报告（与 v1 路径一致的输出格式）
-    from src.data.database import DatabaseManager
-    db = DatabaseManager(_get_db_path())
-
     perf = result.performance
     log_id = db.log_execution(
         execution_type=f"backtest_quantlab_{engine_choice}",

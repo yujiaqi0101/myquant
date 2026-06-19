@@ -90,7 +90,7 @@ class SmallCapQualityV2(SignalStrategy):
         out: dict[str, pd.Series] = {}
         for sym in ctx.data:
             out[sym] = self._signal_one(ctx, sym)
-        df = pd.DataFrame(out).astype("int8")
+        df = pd.DataFrame(out).fillna(0).astype("int8")
         return df
 
     # ------------------------------------------------------------------ #
@@ -114,13 +114,19 @@ class SmallCapQualityV2(SignalStrategy):
             except Exception:
                 pass
 
-        # ---- 1. ROE > threshold ----
-        roe = df["roe"] if "roe" in df.columns else pd.Series(float("nan"), index=df.index)
-        roe_ok = (roe > self.roe_threshold).fillna(False)
+        # ---- 1. ROE > threshold（全空时降级为 True）----
+        if "roe" in df.columns and df["roe"].notna().any():
+            roe = df["roe"]
+            roe_ok = (roe > self.roe_threshold).fillna(False)
+        else:
+            roe_ok = pd.Series(True, index=df.index)
 
-        # ---- 2. 0 < PB < threshold ----
-        pb = df["pb"] if "pb" in df.columns else pd.Series(float("nan"), index=df.index)
-        pb_ok = ((pb > 0) & (pb < self.pb_threshold)).fillna(False)
+        # ---- 2. 0 < PB < threshold（全空时降级为 True）----
+        if "pb" in df.columns and df["pb"].notna().any():
+            pb = df["pb"]
+            pb_ok = ((pb > 0) & (pb < self.pb_threshold)).fillna(False)
+        else:
+            pb_ok = pd.Series(True, index=df.index)
 
         # ---- 3. 营收增长 > threshold（可选）----
         if self.use_revenue_growth and "revenue_growth" in df.columns:
@@ -129,10 +135,13 @@ class SmallCapQualityV2(SignalStrategy):
         else:
             rg_ok = pd.Series(True, index=df.index)
 
-        # ---- 4. 流通市值区间（亿）----
-        mc = df["market_cap"] if "market_cap" in df.columns else pd.Series(float("nan"), index=df.index)
-        mv_yi = mc / 1e8
-        mv_ok = ((mv_yi > self.min_circ_mv) & (mv_yi < self.max_circ_mv)).fillna(False)
+        # ---- 4. 流通市值区间（亿）（全空时降级为 True）----
+        if "market_cap" in df.columns and df["market_cap"].notna().any():
+            mc = df["market_cap"]
+            mv_yi = mc / 1e8
+            mv_ok = ((mv_yi > self.min_circ_mv) & (mv_yi < self.max_circ_mv)).fillna(False)
+        else:
+            mv_ok = pd.Series(True, index=df.index)
 
         # ---- 综合：全 AND ----
         qualified = (roe_ok & pb_ok & rg_ok & mv_ok)

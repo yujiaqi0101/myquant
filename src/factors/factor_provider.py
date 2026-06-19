@@ -216,12 +216,10 @@ class DatabaseFactorProvider(FactorProvider):
     """
     数据库因子提供者
 
-    从本地 SQLite 数据库计算因子值，支持：
-    - 估值因子：从 stock_daily 计算 PB、PE 等
-    - 财务衍生因子：从 financial_data 计算 ROE 等
-
-    适用于 data_source='database' 场景
-    注意：部分复杂因子暂未实现，会抛出 NotImplementedError
+    从本地 SQLite 数据库获取因子值，支持：
+    - 估值因子：从 t_valuation_data 读取（PB、PE 等）
+    - 财务因子：从 t_finance_prime 读取（ROE、营收增长等）
+    - 市值因子：从 t_valuation_data 读取（流通市值等）
     """
 
     def __init__(self, db_path: str):
@@ -231,40 +229,42 @@ class DatabaseFactorProvider(FactorProvider):
         logger.info(f"DatabaseFactorProvider 初始化完成: {db_path}")
 
     def get_valuation(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
-        """
-        获取估值因子
-
-        当前实现：
-        - pb_mrq: 从 stock_daily 计算（需要市值和净资产数据）
-
-        注意：数据库中缺少直接的每股净资产数据，需要进一步实现
-        """
-        if fields == 'pb_mrq':
-            return self._calc_pb(symbols, date)
-        elif fields == 'pe_ttm':
-            return self._calc_pe_ttm(symbols, date)
-        else:
-            raise NotImplementedError(
-                f"DatabaseFactorProvider 暂不支持估值因子: {fields}\n"
-                f"请使用 data_source='eastmoney' 获取该因子"
-            )
+        """从 t_valuation_data 获取估值因子"""
+        # 字段映射：因子field名 → 数据库列名
+        field_map = {
+            'pb_mrq': 'pb_mrq',
+            'pe_ttm': 'pe_ttm',
+            'pe_lyr': 'pe_lyr',
+            'pe_mrq': 'pe_mrq',
+            'ps_ttm': 'ps_ttm',
+            'ps_lyr': 'ps_lyr',
+            'pcf_ttm_oper': 'pcf_ttm_oper',
+            'pcf_ttm_ncf': 'pcf_ttm_ncf',
+            'pcf_lyr_oper': 'pcf_lyr_oper',
+            'pcf_lyr_ncf': 'pcf_lyr_ncf',
+            'dv_ratio': 'dv_ratio',
+            'dv_ttm': 'dv_ttm',
+        }
+        col = field_map.get(fields, fields)
+        return self._query_valuation(col, date, symbols)
 
     def get_financial(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
-        """
-        获取财务衍生因子
-
-        当前实现：
-        - roe: 从 financial_data 计算
-
-        注意：financial_data 存储的是原始报表 JSON，需要解析计算
-        """
-        if fields == 'roe':
-            return self._calc_roe(symbols, date)
-        else:
-            raise NotImplementedError(
-                f"DatabaseFactorProvider 暂不支持财务因子: {fields}\n"
-                f"请使用 data_source='eastmoney' 获取该因子"
-            )
+        """从 t_finance_prime 获取财务因子"""
+        # 字段映射：因子field名 → 数据库列名
+        field_map = {
+            'roe': 'roe_weight_avg',      # roe列常为NULL，用roe_weight_avg替代
+            'roe_weight': 'roe_weight_avg',
+            'roe_cut': 'roe_cut',
+            'roa': 'roa',
+            'gross_margin': 'gross_margin',
+            'net_margin': 'net_margin',
+            'net_prof_yoy': 'net_prof_pcom_yoy',
+            'inc_oper_yoy': 'inc_oper_yoy',
+            'ttl_inc_oper_yoy': 'ttl_inc_oper_yoy',
+            'eps_yoy': 'eps_yoy',
+        }
+        col = field_map.get(fields, fields)
+        return self._query_financial(col, date, symbols)
 
     def get_all_symbols(self) -> List[str]:
         """获取全市场股票代码列表"""
@@ -278,27 +278,121 @@ class DatabaseFactorProvider(FactorProvider):
             return []
 
     def get_mktvalue(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
-        """获取市值因子（数据库暂不支持）"""
-        raise NotImplementedError(
-            f"DatabaseFactorProvider 暂不支持市值因子: {fields}\n"
-            f"请使用 data_source='eastmoney' 获取该因子"
-        )
+        """从 t_valuation_data 获取市值因子"""
+        # 字段映射：市值因子field → 数据库列名
+        field_map = {
+            'a_mv': 'circ_mv',        # A股流通市值
+            'tot_mv': 'market_cap',    # 总市值
+            'total_mv': 'total_mv',    # 总市值
+            'circ_mv': 'circ_mv',      # 流通市值
+        }
+        col = field_map.get(fields, fields)
+        return self._query_valuation(col, date, symbols)
 
-    def _calc_pb(self, symbols: List[str], date: str) -> Dict[str, float]:
-        """计算市净率 PB = 股价 / 每股净资产"""
-        # TODO: 从 stock_daily 获取股价，从 financial_data 获取净资产
-        # 当前数据库缺少直接的每股净资产数据
-        logger.warning("DatabaseFactorProvider._calc_pb 暂未实现")
-        return {}
+    def _query_valuation(self, col: str, date: str, symbols: List[str] = None) -> Dict[str, float]:
+        """查询 t_valuation_data 表，若指定日期无数据则回退到最近可用日期"""
+        try:
+            with self._db.get_connection() as conn:
+                # symbols 是掘金格式（如 SHSE.600000），需转为内部格式
+                if symbols:
+                    internal_codes = [self._gm_to_internal(s) for s in symbols]
+                    placeholders = ','.join(['?'] * len(internal_codes))
+                    sql = f"SELECT stock_code, {col} FROM t_valuation_data WHERE trade_date = ? AND stock_code IN ({placeholders})"
+                    params = [date] + internal_codes
+                else:
+                    sql = f"SELECT stock_code, {col} FROM t_valuation_data WHERE trade_date = ?"
+                    params = [date]
 
-    def _calc_pe_ttm(self, symbols: List[str], date: str) -> Dict[str, float]:
-        """计算市盈率 PE_TTM = 总市值 / 净利润(TTM)"""
-        # TODO: 需要计算 TTM 净利润
-        logger.warning("DatabaseFactorProvider._calc_pe_ttm 暂未实现")
-        return {}
+                df = pd.read_sql(sql, conn, params=params)
 
-    def _calc_roe(self, symbols: List[str], date: str) -> Dict[str, float]:
-        """计算净资产收益率 ROE = 净利润 / 净资产"""
-        # TODO: 从 financial_data 解析 JSON 计算
-        logger.warning("DatabaseFactorProvider._calc_roe 暂未实现")
-        return {}
+                # 若指定日期无数据，回退到最近可用日期
+                if df.empty:
+                    fallback_sql = f"SELECT MAX(trade_date) FROM t_valuation_data WHERE trade_date <= ?"
+                    fallback_date = pd.read_sql(fallback_sql, conn, params=[date]).iloc[0, 0]
+                    if fallback_date is None:
+                        # 尝试最近的日期（不限 <= date）
+                        fallback_sql2 = f"SELECT MAX(trade_date) FROM t_valuation_data"
+                        fallback_date = pd.read_sql(fallback_sql2, conn).iloc[0, 0]
+                    if fallback_date is not None:
+                        logger.debug(f"估值数据 {date} 无记录，回退到 {fallback_date}")
+                        if symbols:
+                            sql = f"SELECT stock_code, {col} FROM t_valuation_data WHERE trade_date = ? AND stock_code IN ({placeholders})"
+                            params = [fallback_date] + internal_codes
+                        else:
+                            sql = f"SELECT stock_code, {col} FROM t_valuation_data WHERE trade_date = ?"
+                            params = [fallback_date]
+                        df = pd.read_sql(sql, conn, params=params)
+
+                if df.empty:
+                    return {}
+
+                result = {}
+                for _, row in df.iterrows():
+                    val = row[col]
+                    if pd.notna(val):
+                        result[row['stock_code']] = float(val)
+                return result
+
+        except Exception as e:
+            logger.error(f"查询估值数据失败 ({col}, {date}): {e}")
+            return {}
+
+    def _query_financial(self, col: str, date: str, symbols: List[str] = None) -> Dict[str, float]:
+        """查询 t_finance_prime 表，取指定日期前最近一期报表"""
+        try:
+            with self._db.get_connection() as conn:
+                # t_finance_prime.stock_code 是掘金格式（SHSE.600000），需用掘金格式匹配
+                if symbols:
+                    # symbols 已经是掘金格式
+                    placeholders = ','.join(['?'] * len(symbols))
+                    sql = f"""
+                        SELECT f.stock_code, f.{col}
+                        FROM t_finance_prime f
+                        INNER JOIN (
+                            SELECT stock_code, MAX(rpt_date) as max_rpt
+                            FROM t_finance_prime
+                            WHERE rpt_date <= ? AND stock_code IN ({placeholders})
+                            GROUP BY stock_code
+                        ) latest ON f.stock_code = latest.stock_code AND f.rpt_date = latest.max_rpt
+                        WHERE f.stock_code IN ({placeholders})
+                    """
+                    params = [date] + list(symbols) + list(symbols)
+                else:
+                    sql = f"""
+                        SELECT f.stock_code, f.{col}
+                        FROM t_finance_prime f
+                        INNER JOIN (
+                            SELECT stock_code, MAX(rpt_date) as max_rpt
+                            FROM t_finance_prime
+                            WHERE rpt_date <= ?
+                            GROUP BY stock_code
+                        ) latest ON f.stock_code = latest.stock_code AND f.rpt_date = latest.max_rpt
+                    """
+                    params = [date]
+
+                df = pd.read_sql(sql, conn, params=params)
+
+                if df.empty:
+                    return {}
+
+                result = {}
+                for _, row in df.iterrows():
+                    val = row[col]
+                    if pd.notna(val):
+                        # stock_code 是掘金格式，转为内部格式
+                        internal_code = self._gm_to_internal(row['stock_code'])
+                        result[internal_code] = float(val)
+                return result
+
+        except Exception as e:
+            logger.error(f"查询财务数据失败 ({col}, {date}): {e}")
+            return {}
+
+    @staticmethod
+    def _gm_to_internal(gm_code: str) -> str:
+        """掘金格式 → 内部格式：SHSE.600000 → 600000.SH"""
+        if '.' in gm_code:
+            prefix, code = gm_code.split('.', 1)
+            suffix = 'SH' if prefix == 'SHSE' else 'SZ'
+            return f"{code}.{suffix}"
+        return gm_code

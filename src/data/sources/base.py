@@ -139,6 +139,12 @@ class DataSource(ABC):
         """获取除权除息数据"""
         return pd.DataFrame()
 
+    # ============ 每日市值 ============
+
+    def get_daily_mktvalue_data(self, symbols: List[str], trade_date: str = None, **kwargs) -> pd.DataFrame:
+        """获取每日市值指标数据"""
+        return pd.DataFrame()
+
     # ============ 合约详情 ============
 
     def get_instrument_detail(self, symbol: str, **kwargs) -> Optional[Dict[str, Any]]:

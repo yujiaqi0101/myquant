@@ -303,6 +303,26 @@ class EastmoneySource(DataSource):
             logger.warning("stk_get_dividend 不可用")
             return pd.DataFrame()
 
+    # ============ 每日市值 ============
+
+    def get_daily_mktvalue_data(self, symbols: List[str], trade_date: str = None, **kwargs) -> pd.DataFrame:
+        """获取每日市值指标数据（stk_get_daily_mktvalue_pt 截面查询）"""
+        self._ensure_connected()
+        em_symbols = SymbolConverter.batch_to_eastmoney(symbols) if symbols else []
+
+        # 市值指标完整字段（对齐东财 stk_get_daily_mktvalue_pt 文档）
+        all_fields = kwargs.get('fields', ','.join([
+            'tot_mv', 'tot_mv_csrc', 'a_mv', 'a_mv_ex_ltd',
+            'b_mv', 'b_mv_ex_ltd', 'ev', 'ev_ex_curr',
+            'ev_ebitda', 'equity_value',
+        ]))
+
+        return self._connector.get_daily_mktvalue(
+            symbols=em_symbols,
+            fields=all_fields,
+            trade_date=trade_date,
+        )
+
     # ============ 合约详情 ============
 
     def get_instrument_detail(self, symbol: str, **kwargs) -> Optional[Dict[str, Any]]:

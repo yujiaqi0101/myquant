@@ -6,7 +6,7 @@ A股量化分析系统
 
 数据来源：
 - 回测/分析一律从数据库读取，缺数据直接报错退出
-- 数据同步通过 config.json 的 data_source.routing 路由到具体数据源
+- 数据同步通过 SourceRegistry 的 DEFAULT_ROUTING 路由到具体数据源
 """
 
 import sys
@@ -642,8 +642,6 @@ def main():
     parser.add_argument('--generate-test-data', action='store_true', help='仅生成测试数据CSV文件')
     parser.add_argument('--start-date', default='20230101', help='数据起始日期 (YYYYMMDD)')
     parser.add_argument('--end-date', default='', help='数据结束日期 (YYYYMMDD)')
-    parser.add_argument('--account', default='', help='（已弃用）')
-    parser.add_argument('--password', default='', help='（已弃用）')
     parser.add_argument('--n-stocks', type=int, default=100, help='测试数据股票数量')
     parser.add_argument('--n-days', type=int, default=250, help='测试数据天数')
     parser.add_argument('--log-level', default='INFO',
@@ -862,7 +860,6 @@ def main():
     print(f"  模拟数据: {TEST_DATA_DIR}")
     
     print(f"\n提示: 运行 'python main.py data sync' 从数据源同步数据到数据库")
-    print("提示: 运行 'streamlit run src/visualization/dashboard.py' 启动可视化界面")
 
 
 if __name__ == "__main__":

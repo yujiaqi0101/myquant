@@ -45,11 +45,17 @@ def _run_data_validate():
     """校验数据完整性"""
     try:
         from src.data.database import DatabaseManager
+        from src.data.data_validator import DataValidator
         from config.config import DATABASE_CONFIG
 
         db = DatabaseManager(DATABASE_CONFIG.get('path'))
-        validator = db.validate_data()
-        print(f"\n✓ 数据校验完成")
+        validator = DataValidator(db)
+
+        from datetime import datetime
+        start_date = '20230101'
+        end_date = datetime.now().strftime('%Y%m%d')
+        report = validator.validate_and_report(start_date, end_date)
+        print(report)
     except Exception as e:
         print(f"校验失败: {e}")
 
@@ -79,7 +85,7 @@ def _run_data_status():
             ('t_index_daily', '指数日频数据'),
             ('t_sector_info', '板块基本信息'),
             ('t_stock_list_in_sector', '板块成分股'),
-            ('financial_data', '财务数据'),
+            ('t_finance_prime', '财务数据'),
             ('t_valuation_data', '估值数据'),
             ('t_dividend_date', '除权除息'),
         ]

@@ -73,17 +73,15 @@ class Portfolio:
 
         # 总权益 = 现金 + 所有 symbol 持仓市值
         # last_prices 由 record() 持续更新
-        market_value = sum(
-
-            self.positions[s].qty
-            * self.last_prices.get(
-                self.positions[s].symbol,
-                self.positions[s].avg_price
-                or 0
-            )
-
-            for s in self.positions
-        )
+        # NaN 价格（停牌/未上市）跳过，用上次有效价格
+        market_value = 0.0
+        for s in self.positions:
+            pos = self.positions[s]
+            price = self.last_prices.get(pos.symbol, pos.avg_price or 0)
+            # 跳过 NaN 价格
+            if price != price:
+                continue
+            market_value += pos.qty * price
 
         return (
             self.cash
@@ -97,9 +95,10 @@ class Portfolio:
         prices: Dict[str, float]
     ):
 
-        # 更新每个 symbol 的最近价格
+        # 更新每个 symbol 的最近价格（跳过 NaN）
         for sym, p in prices.items():
-
+            if p != p:
+                continue
             self.last_prices[sym] = p
 
         self.timestamps.append(

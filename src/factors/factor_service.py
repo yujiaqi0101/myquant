@@ -18,7 +18,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
-from config.config import get_data_source, DATABASE_CONFIG
+from config.config import DATABASE_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +42,11 @@ class FactorService:
         Parameters
         ----------
         data_source : str, optional
-            数据源名称，'eastmoney' 或 'database'，None 则读取配置
+            数据源名称，'eastmoney' 或 'database'，None 则默认使用数据库
         db_path : str, optional
             数据库路径，None 则使用默认配置
         """
         from .factor_provider import EastmoneyFactorProvider, DatabaseFactorProvider
-
-        # 确定数据源
-        if data_source is None:
-            ds = get_data_source()
-            data_source = ds.value if hasattr(ds, 'value') else ds
 
         # 创建对应的 Provider
         if data_source == 'eastmoney':
