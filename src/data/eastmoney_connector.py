@@ -10,6 +10,7 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
 import pandas as pd
@@ -214,9 +215,9 @@ class EastmoneyConnector:
 
         return self._request_with_retry(get_symbol_infos, **kwargs)
 
-    def get_index_constituents(self, index_code: str, trade_date: str = None) -> List[str]:
+    def get_index_constituents(self, index_code: str, trade_date: str = None) -> pd.DataFrame:
         """
-        获取指数成分股
+        获取指数成分股（来源：stk_get_index_constituents）
 
         Parameters
         ----------
@@ -227,8 +228,8 @@ class EastmoneyConnector:
 
         Returns
         -------
-        List[str]
-            成分股代码列表（系统内部格式）
+        pd.DataFrame
+            包含列: index_code, stock_code, weight, trade_date, market_value_total, market_value_circ
         """
         from gm.api import stk_get_index_constituents
 
@@ -241,17 +242,25 @@ class EastmoneyConnector:
             trade_date=trade_date,
         )
 
-        if result is None:
-            return []
+        if result is None or (isinstance(result, pd.DataFrame) and result.empty):
+            return pd.DataFrame()
 
-        # 转换回系统内部格式
-        if isinstance(result, pd.DataFrame):
-            return SymbolConverter.batch_to_internal(result['symbol'].tolist())
-        elif isinstance(result, list):
-            return SymbolConverter.batch_to_internal(
-                [item['symbol'] for item in result]
-            )
-        return []
+        # 统一转为 DataFrame
+        if not isinstance(result, pd.DataFrame):
+            result = pd.DataFrame(result)
+
+        # 转换代码格式并重命名列
+        result['index_code'] = index_code
+        result['stock_code'] = result['symbol'].apply(SymbolConverter.to_internal)
+        result = result.rename(columns={
+            'weight': 'weight',
+            'trade_date': 'trade_date',
+            'market_value_total': 'market_value_total',
+            'market_value_circ': 'market_value_circ',
+        })
+
+        return result[['index_code', 'stock_code', 'weight', 'trade_date',
+                        'market_value_total', 'market_value_circ']]
 
     def get_trading_dates(
         self,
@@ -360,6 +369,8 @@ class EastmoneyConnector:
 
         # 分批请求
         merge_cols = ['symbol', 'pub_date', 'rpt_date']
+        # 只保留 merge_cols + 本次请求的字段列，丢弃 API 额外返回的非指标列
+        keep_cols = set(merge_cols + field_list)
         result_df = None
 
         for i in range(0, len(field_list), max_fields_per_request):
@@ -368,6 +379,9 @@ class EastmoneyConnector:
             try:
                 df = self.get_financial_deriv(symbols=symbols, fields=batch_fields, date=date)
                 if df is not None and not df.empty:
+                    # 只保留需要的列，丢弃 API 额外返回列（如 data_type, rpt_type）
+                    cols = [c for c in df.columns if c in keep_cols]
+                    df = df[cols]
                     if result_df is None:
                         result_df = df
                     else:
@@ -451,6 +465,8 @@ class EastmoneyConnector:
             return self.get_financial_prime(symbols=symbols, fields=fields, date=date)
 
         merge_cols = ['symbol', 'pub_date', 'rpt_date']
+        # 只保留 merge_cols + 本次请求的字段列，丢弃 API 额外返回的非指标列
+        keep_cols = set(merge_cols + field_list)
         result_df = None
 
         for i in range(0, len(field_list), max_fields_per_request):
@@ -459,6 +475,9 @@ class EastmoneyConnector:
             try:
                 df = self.get_financial_prime(symbols=symbols, fields=batch_fields, date=date)
                 if df is not None and not df.empty:
+                    # 只保留需要的列，丢弃 API 额外返回列（如 data_type, rpt_type）
+                    cols = [c for c in df.columns if c in keep_cols]
+                    df = df[cols]
                     if result_df is None:
                         result_df = df
                     else:
@@ -475,49 +494,86 @@ class EastmoneyConnector:
 
     def get_daily_valuation(
         self,
-        symbols: List[str],
+        symbol: str,
         fields: str = 'pb_mrq',
-        trade_date: str = None,
+        start_date: str = None,
+        end_date: str = None,
     ) -> pd.DataFrame:
         """
-        获取估值指标单日截面数据（如 PB）
+        获取估值指标时序数据（如 PB）
 
         Parameters
         ----------
-        symbols : List[str]
-            掘金格式代码列表
+        symbol : str
+            掘金格式代码，单个标的，如 'SHSE.600000'
         fields : str
             字段列表，如 'pb_mrq,pe_ttm'
-        trade_date : str
-            查询日期 'YYYY-MM-DD'
+        start_date : str
+            开始日期 'YYYY-MM-DD'
+        end_date : str
+            结束日期 'YYYY-MM-DD'
 
         Returns
         -------
         pd.DataFrame
             估值指标数据
         """
-        from gm.api import stk_get_daily_valuation_pt
+        from gm.api import stk_get_daily_valuation
 
         kwargs = dict(
-            symbols=symbols,
+            symbol=symbol,
             fields=fields,
             df=True,
         )
+        if start_date:
+            kwargs['start_date'] = start_date
+        if end_date:
+            kwargs['end_date'] = end_date
+
+        return self._request_with_retry(stk_get_daily_valuation, **kwargs)
+
+    def get_daily_valuation_pt(
+        self,
+        symbols: List[str],
+        fields: str = 'pe_ttm',
+        trade_date: str = None,
+    ) -> pd.DataFrame:
+        """
+        获取估值指标截面数据（多标的单日），用于批量同步
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            字段列表
+        trade_date : str
+            交易日期 'YYYY-MM-DD'
+
+        Returns
+        -------
+        pd.DataFrame
+            估值指标截面数据
+        """
+        from gm.api import stk_get_daily_valuation_pt
+
+        kwargs = dict(symbols=symbols, fields=fields, df=True)
         if trade_date:
             kwargs['trade_date'] = trade_date
-
         return self._request_with_retry(stk_get_daily_valuation_pt, **kwargs)
 
     def get_daily_valuation_batch(
         self,
         symbols: List[str],
         fields: str,
-        trade_date: str = None,
+        start_date: str = None,
+        end_date: str = None,
         max_fields_per_request: int = 20,
+        max_workers: int = 5,
     ) -> pd.DataFrame:
         """
-        分批获取估值指标单日截面数据，每次最多请求 max_fields_per_request 个字段，
-        然后按 symbol + trade_date 合并结果。
+        并发获取估值指标时序数据：按标的遍历，使用线程池并发请求，
+        每次最多请求 max_fields_per_request 个字段。
 
         Parameters
         ----------
@@ -525,10 +581,14 @@ class EastmoneyConnector:
             掘金格式代码列表
         fields : str
             完整字段列表，逗号分隔
-        trade_date : str
-            查询日期 'YYYY-MM-DD'
+        start_date : str
+            开始日期 'YYYY-MM-DD'
+        end_date : str
+            结束日期 'YYYY-MM-DD'
         max_fields_per_request : int
             每次请求最大字段数，默认 20
+        max_workers : int
+            并发线程数，默认 5
 
         Returns
         -------
@@ -536,32 +596,56 @@ class EastmoneyConnector:
             合并后的估值指标数据
         """
         field_list = [f.strip() for f in fields.split(',') if f.strip()]
-        if len(field_list) <= max_fields_per_request:
-            return self.get_daily_valuation(symbols=symbols, fields=fields, trade_date=trade_date)
+        need_split = len(field_list) > max_fields_per_request
+        # 只保留 merge_cols + 请求字段列，丢弃 API 额外返回列
+        valuation_keep_cols = set(['symbol', 'trade_date'] + field_list)
 
-        # 分批请求
-        merge_cols = ['symbol', 'trade_date']
-        result_df = None
-
-        for i in range(0, len(field_list), max_fields_per_request):
-            batch_fields = ','.join(field_list[i:i + max_fields_per_request])
-            logger.debug(f"估值数据分批请求字段 {i // max_fields_per_request + 1}: {batch_fields}")
+        def _fetch_one(sym):
+            """获取单个标的的估值数据"""
             try:
-                df = self.get_daily_valuation(symbols=symbols, fields=batch_fields, trade_date=trade_date)
-                if df is not None and not df.empty:
-                    if result_df is None:
-                        result_df = df
-                    else:
-                        new_cols = [c for c in df.columns if c not in merge_cols]
-                        result_df = result_df.merge(
-                            df[merge_cols + new_cols],
-                            on=merge_cols,
-                            how='outer',
-                        )
+                if not need_split:
+                    return self.get_daily_valuation(symbol=sym, fields=fields,
+                                                     start_date=start_date, end_date=end_date)
+                # 分批请求字段
+                sym_result = None
+                merge_cols = ['symbol', 'trade_date']
+                for i in range(0, len(field_list), max_fields_per_request):
+                    batch_fields = ','.join(field_list[i:i + max_fields_per_request])
+                    df = self.get_daily_valuation(symbol=sym, fields=batch_fields,
+                                                   start_date=start_date, end_date=end_date)
+                    if df is not None and not df.empty:
+                        # 只保留需要的列，丢弃 API 额外返回列
+                        cols = [c for c in df.columns if c in valuation_keep_cols]
+                        df = df[cols]
+                        if sym_result is None:
+                            sym_result = df
+                        else:
+                            new_cols = [c for c in df.columns if c not in merge_cols]
+                            sym_result = sym_result.merge(
+                                df[merge_cols + new_cols],
+                                on=merge_cols,
+                                how='outer',
+                            )
+                return sym_result
             except Exception as e:
-                logger.warning(f"估值数据字段批次 {i // max_fields_per_request + 1} 请求失败: {e}")
+                logger.debug(f"获取 {sym} 估值数据失败: {e}")
+                return None
 
-        return result_df if result_df is not None else pd.DataFrame()
+        all_dfs = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_fetch_one, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                try:
+                    df = future.result()
+                    if df is not None and not df.empty:
+                        all_dfs.append(df)
+                except Exception as e:
+                    sym = futures[future]
+                    logger.debug(f"获取 {sym} 估值数据异常: {e}")
+
+        if all_dfs:
+            return pd.concat(all_dfs, ignore_index=True)
+        return pd.DataFrame()
 
     def get_money_flow(
         self,
@@ -596,38 +680,126 @@ class EastmoneyConnector:
 
     def get_daily_mktvalue(
         self,
-        symbols: List[str],
+        symbol: str,
         fields: str = 'a_mv',
-        trade_date: str = None,
+        start_date: str = None,
+        end_date: str = None,
     ) -> pd.DataFrame:
         """
-        获取市值指标单日截面数据（如流通市值）
+        获取市值指标时序数据（如流通市值）
 
         Parameters
         ----------
-        symbols : List[str]
-            掘金格式代码列表
+        symbol : str
+            掘金格式代码，单个标的，如 'SHSE.600000'
         fields : str
             字段列表，如 'a_mv,tot_mv'
-        trade_date : str
-            查询日期 'YYYY-MM-DD'
+        start_date : str
+            开始日期 'YYYY-MM-DD'
+        end_date : str
+            结束日期 'YYYY-MM-DD'
 
         Returns
         -------
         pd.DataFrame
             市值指标数据
         """
-        from gm.api import stk_get_daily_mktvalue_pt
+        from gm.api import stk_get_daily_mktvalue
 
         kwargs = dict(
-            symbols=symbols,
+            symbol=symbol,
             fields=fields,
             df=True,
         )
+        if start_date:
+            kwargs['start_date'] = start_date
+        if end_date:
+            kwargs['end_date'] = end_date
+
+        return self._request_with_retry(stk_get_daily_mktvalue, **kwargs)
+
+    def get_daily_mktvalue_pt(
+        self,
+        symbols: List[str],
+        fields: str = 'a_mv',
+        trade_date: str = None,
+    ) -> pd.DataFrame:
+        """
+        获取市值指标截面数据（多标的单日），用于批量同步
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            字段列表
+        trade_date : str
+            交易日期 'YYYY-MM-DD'
+
+        Returns
+        -------
+        pd.DataFrame
+            市值指标截面数据
+        """
+        from gm.api import stk_get_daily_mktvalue_pt
+
+        kwargs = dict(symbols=symbols, fields=fields, df=True)
         if trade_date:
             kwargs['trade_date'] = trade_date
-
         return self._request_with_retry(stk_get_daily_mktvalue_pt, **kwargs)
+
+    def get_daily_mktvalue_batch(
+        self,
+        symbols: List[str],
+        fields: str,
+        start_date: str = None,
+        end_date: str = None,
+        max_workers: int = 5,
+    ) -> pd.DataFrame:
+        """
+        并发获取市值指标时序数据：按标的遍历，使用线程池并发请求
+
+        Parameters
+        ----------
+        symbols : List[str]
+            掘金格式代码列表
+        fields : str
+            字段列表，逗号分隔
+        start_date : str
+            开始日期 'YYYY-MM-DD'
+        end_date : str
+            结束日期 'YYYY-MM-DD'
+        max_workers : int
+            并发线程数，默认 5
+
+        Returns
+        -------
+        pd.DataFrame
+            合并后的市值指标数据
+        """
+        def _fetch_one(sym):
+            try:
+                return self.get_daily_mktvalue(symbol=sym, fields=fields,
+                                                start_date=start_date, end_date=end_date)
+            except Exception as e:
+                logger.debug(f"获取 {sym} 市值数据失败: {e}")
+                return None
+
+        all_dfs = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_fetch_one, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                try:
+                    df = future.result()
+                    if df is not None and not df.empty:
+                        all_dfs.append(df)
+                except Exception as e:
+                    sym = futures[future]
+                    logger.debug(f"获取 {sym} 市值数据异常: {e}")
+
+        if all_dfs:
+            return pd.concat(all_dfs, ignore_index=True)
+        return pd.DataFrame()
 
     def get_industry_category(
         self,

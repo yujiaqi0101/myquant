@@ -109,7 +109,7 @@ class EastmoneyFactorProvider(FactorProvider):
     东财掘金因子提供者
 
     调用 gm.api 获取真实财务数据，支持：
-    - 估值因子：PB、PE_TTM 等（stk_get_daily_valuation_pt）
+    - 估值因子：PB、PE_TTM 等（stk_get_daily_valuation）
     - 财务衍生因子：ROE 等（stk_get_finance_deriv_pt）
 
     适用于 data_source='eastmoney' 场景
@@ -124,14 +124,15 @@ class EastmoneyFactorProvider(FactorProvider):
         logger.info("EastmoneyFactorProvider 初始化完成")
 
     def get_valuation(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
-        """获取估值因子"""
+        """获取估值因子（按标的遍历，取指定日期数据）"""
         from src.data.symbol_converter import SymbolConverter
 
         try:
-            df = self._connector.get_daily_valuation(
+            df = self._connector.get_daily_valuation_batch(
                 symbols=symbols,
                 fields=fields,
-                trade_date=date,
+                start_date=date,
+                end_date=date,
             )
 
             if df is None or df.empty:
@@ -187,14 +188,15 @@ class EastmoneyFactorProvider(FactorProvider):
             return []
 
     def get_mktvalue(self, symbols: List[str], fields: str, date: str) -> Dict[str, float]:
-        """获取市值因子"""
+        """获取市值因子（按标的遍历，取指定日期数据）"""
         from src.data.symbol_converter import SymbolConverter
 
         try:
-            df = self._connector.get_daily_mktvalue(
+            df = self._connector.get_daily_mktvalue_batch(
                 symbols=symbols,
                 fields=fields,
-                trade_date=date,
+                start_date=date,
+                end_date=date,
             )
 
             if df is None or df.empty:

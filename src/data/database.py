@@ -201,18 +201,18 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_best_category ON best_records(category)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_best_metric ON best_records(category, metric_name)')
 
-            # 指数成分股/板块成分股表
+            # 指数成分股表（数据来源：stk_get_index_constituents）
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS t_stock_in_index (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     index_code VARCHAR(20) NOT NULL,
                     stock_code VARCHAR(20) NOT NULL,
-                    weight REAL NOT NULL,
-                    market_cap REAL,
-                    pe_ratio REAL,
-                    pb_ratio REAL,
+                    weight REAL,
+                    trade_date VARCHAR(20),
+                    market_value_total REAL,
+                    market_value_circ REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(index_code, stock_code)
+                    UNIQUE(index_code, stock_code, trade_date)
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_index ON t_stock_in_index(index_code)')
@@ -371,37 +371,11 @@ class DatabaseManager:
                 'ALTER TABLE t_finance_prime ADD COLUMN net_asset REAL',
                 'ALTER TABLE t_finance_prime ADD COLUMN net_prof REAL',
                 'ALTER TABLE t_finance_prime ADD COLUMN net_prof_cut REAL',
-                # t_valuation_data 新增字段（对齐东财 stk_get_daily_valuation_pt）
-                'ALTER TABLE t_valuation_data ADD COLUMN pe_mrq REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pe_1q REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pe_2q REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pe_3q REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pe_ttm_cut REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pe_lyr_cut REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pe_mrq_cut REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pb_lyr REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pb_lyr_1 REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pb_mrq_1 REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pcf_ttm_oper REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pcf_ttm_ncf REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pcf_lyr_oper REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN pcf_lyr_ncf REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN ps_lyr REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN ps_mrq REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN ps_1q REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN ps_2q REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN ps_3q REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN peg_lyr REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN peg_mrq REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN peg_np_cgr REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN dy_ttm REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN dy_lfy REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN dv_ratio REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN dv_ttm REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN market_cap REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN circ_market_cap REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN total_share REAL',
-                'ALTER TABLE t_valuation_data ADD COLUMN float_share REAL',
+                # t_valuation_data 迁移：重建表以对齐新字段结构
+                # 旧表可能含 pb_lyr_1, pb_mrq_1, peg_mrq, peg_np_cgr, peg_npp_cgr, dv_ratio, dv_ttm,
+                # market_cap, circ_market_cap, total_share, float_share 等已移除字段
+                # 新表字段：trade_date, stock_code, pe_ttm~pe_3q, pe_ttm_cut~pe_3q_cut,
+                #           pb_lyr, pb_mrq, pcf_*, ps_*, peg_lyr/1q/2q/3q, dy_ttm, dy_lfy, created_at
                 # t_dividend_date 新增字段（对齐东财 stk_get_dividend）
                 'ALTER TABLE t_dividend_date ADD COLUMN pub_date DATE',
                 'ALTER TABLE t_dividend_date ADD COLUMN scheme_type TEXT',
@@ -439,6 +413,57 @@ class DatabaseManager:
                     cursor.execute(stmt)
                 except sqlite3.OperationalError:
                     pass  # 字段已存在，忽略
+
+            # ============ 迁移：重建 t_valuation_data 表 ============
+            # 旧表可能含已移除字段（pb_lyr_1, pb_mrq_1, peg_mrq, peg_np_cgr, peg_npp_cgr,
+            # dv_ratio, dv_ttm, market_cap, circ_market_cap, total_share, float_share），
+            # 需要重建为新字段结构
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='t_valuation_data'")
+            if cursor.fetchone():
+                cursor.execute("PRAGMA table_info(t_valuation_data)")
+                existing_cols = {row[1] for row in cursor.fetchall()}
+                removed_cols = {'pb_lyr_1', 'pb_mrq_1', 'peg_mrq', 'peg_np_cgr', 'peg_npp_cgr',
+                                'dv_ratio', 'dv_ttm', 'market_cap', 'circ_market_cap',
+                                'total_share', 'float_share', 'pb_lf'}
+                if existing_cols & removed_cols:
+                    # 旧表含已移除字段，需要重建
+                    new_cols = ['trade_date', 'stock_code',
+                                'pe_ttm', 'pe_lyr', 'pe_mrq', 'pe_1q', 'pe_2q', 'pe_3q',
+                                'pe_ttm_cut', 'pe_lyr_cut', 'pe_mrq_cut',
+                                'pe_1q_cut', 'pe_2q_cut', 'pe_3q_cut',
+                                'pb_lyr', 'pb_mrq',
+                                'pcf_ttm_oper', 'pcf_ttm_ncf', 'pcf_lyr_oper', 'pcf_lyr_ncf',
+                                'ps_ttm', 'ps_lyr', 'ps_mrq', 'ps_1q', 'ps_2q', 'ps_3q',
+                                'peg_lyr', 'peg_1q', 'peg_2q', 'peg_3q',
+                                'dy_ttm', 'dy_lfy']
+                    migrate_cols = [c for c in new_cols if c in existing_cols]
+                    cols_str = ', '.join(migrate_cols)
+                    cursor.execute('ALTER TABLE t_valuation_data RENAME TO t_valuation_data_old')
+                    cursor.execute(f'''
+                        CREATE TABLE t_valuation_data (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            trade_date DATE NOT NULL,
+                            stock_code VARCHAR(20) NOT NULL,
+                            pe_ttm REAL, pe_lyr REAL, pe_mrq REAL,
+                            pe_1q REAL, pe_2q REAL, pe_3q REAL,
+                            pe_ttm_cut REAL, pe_lyr_cut REAL, pe_mrq_cut REAL,
+                            pe_1q_cut REAL, pe_2q_cut REAL, pe_3q_cut REAL,
+                            pb_lyr REAL, pb_mrq REAL,
+                            pcf_ttm_oper REAL, pcf_ttm_ncf REAL,
+                            pcf_lyr_oper REAL, pcf_lyr_ncf REAL,
+                            ps_ttm REAL, ps_lyr REAL, ps_mrq REAL,
+                            ps_1q REAL, ps_2q REAL, ps_3q REAL,
+                            peg_lyr REAL, peg_1q REAL, peg_2q REAL, peg_3q REAL,
+                            dy_ttm REAL, dy_lfy REAL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(trade_date, stock_code)
+                        )
+                    ''')
+                    cursor.execute(f'INSERT INTO t_valuation_data ({cols_str}) SELECT {cols_str} FROM t_valuation_data_old')
+                    cursor.execute('DROP TABLE t_valuation_data_old')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_valuation_date ON t_valuation_data(trade_date)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_valuation_code ON t_valuation_data(stock_code)')
+                    logger.info("t_valuation_data 表已重建，移除旧字段")
 
             # ============ 迁移：旧表 financial_data 重命名为 t_finance_prime ============
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='financial_data'")
@@ -552,6 +577,7 @@ class DatabaseManager:
                     base_date DATE,
                     base_point REAL,
                     publish_date DATE,
+                    is_sync INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -573,6 +599,18 @@ class DatabaseManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_log_type ON t_data_sync(sync_type)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_log_status ON t_data_sync(status)')
+
+            # 数据同步日期日志表 - 记录每个表已同步的日期，用于快速查询数据库现有数据范围
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS t_sync_data_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name VARCHAR(50) NOT NULL,
+                    data_date DATE NOT NULL,
+                    sync_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_data_log_table ON t_sync_data_log(table_name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_data_log_date ON t_sync_data_log(data_date)')
 
             # ============ 估值分析模块表 ============
 
@@ -620,7 +658,166 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON t_finance_prime(stock_code)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_date ON t_finance_prime(rpt_date)')
 
-            # 每日市值指标表 - 对齐东财 stk_get_daily_mktvalue_pt 返回字段
+            # 财务衍生指标表 - 对齐东财 stk_get_finance_deriv / stk_get_finance_deriv_pt 返回字段（142个指标）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS t_finance_deriv (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code VARCHAR(20) NOT NULL,
+                    pub_date DATE,
+                    rpt_date DATE,
+                    rpt_type INTEGER,
+                    data_type INTEGER,
+                    eps_basic REAL,
+                    eps_dil2 REAL,
+                    eps_dil REAL,
+                    eps_basic_cut REAL,
+                    eps_dil2_cut REAL,
+                    eps_dil_cut REAL,
+                    bps REAL,
+                    net_cf_oper_ps REAL,
+                    ttl_inc_oper_ps REAL,
+                    inc_oper_ps REAL,
+                    ebit_ps REAL,
+                    cptl_rsv_ps REAL,
+                    sur_rsv_ps REAL,
+                    retain_prof_ps REAL,
+                    retain_inc_ps REAL,
+                    net_cf_ps REAL,
+                    fcff_ps REAL,
+                    fcfe_ps REAL,
+                    ebitda_ps REAL,
+                    roe REAL,
+                    roe_weight REAL,
+                    roe_avg REAL,
+                    roe_cut REAL,
+                    roe_weight_cut REAL,
+                    ocf_toi REAL,
+                    eps_dil_yoy REAL,
+                    net_cf_oper_ps_yoy REAL,
+                    ttl_inc_oper_yoy REAL,
+                    inc_oper_yoy REAL,
+                    oper_prof_yoy REAL,
+                    ttl_prof_yoy REAL,
+                    net_prof_pcom_yoy REAL,
+                    net_prof_pcom_cut_yoy REAL,
+                    net_cf_oper_yoy REAL,
+                    roe_yoy REAL,
+                    net_asset_yoy REAL,
+                    ttl_liab_yoy REAL,
+                    ttl_asset_yoy REAL,
+                    net_cash_flow_yoy REAL,
+                    bps_gr_begin_year REAL,
+                    ttl_asset_gr_begin_year REAL,
+                    ttl_eqy_pcom_gr_begin_year REAL,
+                    net_debt_eqy_ev REAL,
+                    int_debt_eqy_ev REAL,
+                    eps_bas_yoy REAL,
+                    ebit REAL,
+                    ebitda REAL,
+                    ebit_inverse REAL,
+                    ebitda_inverse REAL,
+                    nr_prof_loss REAL,
+                    net_prof_cut REAL,
+                    gross_prof REAL,
+                    oper_net_inc REAL,
+                    val_chg_net_inc REAL,
+                    exp_rd REAL,
+                    ttl_inv_cptl REAL,
+                    work_cptl REAL,
+                    net_work_cptl REAL,
+                    tg_asset REAL,
+                    retain_inc REAL,
+                    int_debt REAL,
+                    net_debt REAL,
+                    curr_liab_non_int REAL,
+                    ncur_liab_non_int REAL,
+                    fcff REAL,
+                    fcfe REAL,
+                    cur_depr_amort REAL,
+                    eqy_mult_dupont REAL,
+                    net_prof_pcom_np REAL,
+                    net_prof_tp REAL,
+                    ttl_prof_ebit REAL,
+                    roe_cut_avg REAL,
+                    roe_add REAL,
+                    roe_ann REAL,
+                    roa REAL,
+                    roa_ann REAL,
+                    jroa REAL,
+                    jroa_ann REAL,
+                    roic REAL,
+                    sale_npm REAL,
+                    sale_gpm REAL,
+                    sale_cost_rate REAL,
+                    sale_exp_rate REAL,
+                    net_prof_toi REAL,
+                    oper_prof_toi REAL,
+                    ebit_toi REAL,
+                    ttl_cost_oper_toi REAL,
+                    exp_oper_toi REAL,
+                    exp_admin_toi REAL,
+                    exp_fin_toi REAL,
+                    ast_impr_loss_toi REAL,
+                    ebitda_toi REAL,
+                    oper_net_inc_tp REAL,
+                    val_chg_net_inc_tp REAL,
+                    net_exp_noper_tp REAL,
+                    inc_tax_tp REAL,
+                    net_prof_cut_np REAL,
+                    eqy_mult REAL,
+                    curr_ast_ta REAL,
+                    ncurr_ast_ta REAL,
+                    tg_ast_ta REAL,
+                    ttl_eqy_pcom_tic REAL,
+                    int_debt_tic REAL,
+                    curr_liab_tl REAL,
+                    ncurr_liab_tl REAL,
+                    ast_liab_rate REAL,
+                    quick_rate REAL,
+                    curr_rate REAL,
+                    cons_quick_rate REAL,
+                    liab_eqy_rate REAL,
+                    ttl_eqy_pcom_tl REAL,
+                    ttl_eqy_pcom_debt REAL,
+                    tg_ast_tl REAL,
+                    tg_ast_int_debt REAL,
+                    tg_ast_net_debt REAL,
+                    ebitda_tl REAL,
+                    net_cf_oper_tl REAL,
+                    net_cf_oper_int_debt REAL,
+                    net_cf_oper_curr_liab REAL,
+                    net_cf_oper_net_liab REAL,
+                    ebit_int_cover REAL,
+                    long_liab_work_cptl REAL,
+                    ebitda_int_debt REAL,
+                    oper_cycle REAL,
+                    inv_turnover_days REAL,
+                    acct_rcv_turnover_days REAL,
+                    inv_turnover_rate REAL,
+                    acct_rcv_turnover_rate REAL,
+                    curr_ast_turnover_rate REAL,
+                    fix_ast_turnover_rate REAL,
+                    ttl_ast_turnover_rate REAL,
+                    cash_rcv_sale_oi REAL,
+                    net_cf_oper_oi REAL,
+                    net_cf_oper_oni REAL,
+                    cptl_exp_da REAL,
+                    cash_rate REAL,
+                    acct_pay_turnover_days REAL,
+                    acct_pay_turnover_rate REAL,
+                    net_oper_cycle REAL,
+                    ttl_cost_oper_yoy REAL,
+                    net_prof_yoy REAL,
+                    net_cf_oper_np REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(stock_code, rpt_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_finance_deriv_code ON t_finance_deriv(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_finance_deriv_date ON t_finance_deriv(rpt_date)')
+
+            # 每日市值指标表 - 对齐东财 stk_get_daily_mktvalue 返回字段
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS t_stock_mktvalue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1010,7 +1207,7 @@ class DatabaseManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_best_perf_id ON strategy_best_perf(strategy_id)')
 
-            # 估值数据表 - 对齐东财 stk_get_daily_valuation_pt 返回字段
+            # 估值数据表 - 对齐东财 stk_get_daily_valuation_pt 返回字段（35个估值指标）
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS t_valuation_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1029,7 +1226,6 @@ class DatabaseManager:
                     pe_2q_cut REAL,
                     pe_3q_cut REAL,
                     pb_lyr REAL,
-                    pb_lf REAL,
                     pb_mrq REAL,
                     pcf_ttm_oper REAL,
                     pcf_ttm_ncf REAL,
@@ -1047,12 +1243,6 @@ class DatabaseManager:
                     peg_3q REAL,
                     dy_ttm REAL,
                     dy_lfy REAL,
-                    market_cap REAL,
-                    circ_market_cap REAL,
-                    total_share REAL,
-                    float_share REAL,
-                    total_mv REAL,
-                    circ_mv REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(trade_date, stock_code)
                 )
@@ -1180,7 +1370,6 @@ class DatabaseManager:
                     ('pe_2q_cut', 'REAL', None),
                     ('pe_3q_cut', 'REAL', None),
                     ('pb_lyr', 'REAL', None),
-                    ('pb_lf', 'REAL', None),
                     ('pb_mrq', 'REAL', None),
                     ('pcf_ttm_oper', 'REAL', None),
                     ('pcf_ttm_ncf', 'REAL', None),
@@ -1198,12 +1387,154 @@ class DatabaseManager:
                     ('peg_3q', 'REAL', None),
                     ('dy_ttm', 'REAL', None),
                     ('dy_lfy', 'REAL', None),
-                    ('market_cap', 'REAL', None),
-                    ('circ_market_cap', 'REAL', None),
-                    ('total_share', 'REAL', None),
-                    ('float_share', 'REAL', None),
-                    ('total_mv', 'REAL', None),
-                    ('circ_mv', 'REAL', None),
+                ],
+                't_finance_deriv': [
+                    ('pub_date', 'DATE', None),
+                    ('rpt_date', 'DATE', None),
+                    ('rpt_type', 'INTEGER', None),
+                    ('data_type', 'INTEGER', None),
+                    ('eps_basic', 'REAL', None),
+                    ('eps_dil2', 'REAL', None),
+                    ('eps_dil', 'REAL', None),
+                    ('eps_basic_cut', 'REAL', None),
+                    ('eps_dil2_cut', 'REAL', None),
+                    ('eps_dil_cut', 'REAL', None),
+                    ('bps', 'REAL', None),
+                    ('net_cf_oper_ps', 'REAL', None),
+                    ('ttl_inc_oper_ps', 'REAL', None),
+                    ('inc_oper_ps', 'REAL', None),
+                    ('ebit_ps', 'REAL', None),
+                    ('cptl_rsv_ps', 'REAL', None),
+                    ('sur_rsv_ps', 'REAL', None),
+                    ('retain_prof_ps', 'REAL', None),
+                    ('retain_inc_ps', 'REAL', None),
+                    ('net_cf_ps', 'REAL', None),
+                    ('fcff_ps', 'REAL', None),
+                    ('fcfe_ps', 'REAL', None),
+                    ('ebitda_ps', 'REAL', None),
+                    ('roe', 'REAL', None),
+                    ('roe_weight', 'REAL', None),
+                    ('roe_avg', 'REAL', None),
+                    ('roe_cut', 'REAL', None),
+                    ('roe_weight_cut', 'REAL', None),
+                    ('ocf_toi', 'REAL', None),
+                    ('eps_dil_yoy', 'REAL', None),
+                    ('net_cf_oper_ps_yoy', 'REAL', None),
+                    ('ttl_inc_oper_yoy', 'REAL', None),
+                    ('inc_oper_yoy', 'REAL', None),
+                    ('oper_prof_yoy', 'REAL', None),
+                    ('ttl_prof_yoy', 'REAL', None),
+                    ('net_prof_pcom_yoy', 'REAL', None),
+                    ('net_prof_pcom_cut_yoy', 'REAL', None),
+                    ('net_cf_oper_yoy', 'REAL', None),
+                    ('roe_yoy', 'REAL', None),
+                    ('net_asset_yoy', 'REAL', None),
+                    ('ttl_liab_yoy', 'REAL', None),
+                    ('ttl_asset_yoy', 'REAL', None),
+                    ('net_cash_flow_yoy', 'REAL', None),
+                    ('bps_gr_begin_year', 'REAL', None),
+                    ('ttl_asset_gr_begin_year', 'REAL', None),
+                    ('ttl_eqy_pcom_gr_begin_year', 'REAL', None),
+                    ('net_debt_eqy_ev', 'REAL', None),
+                    ('int_debt_eqy_ev', 'REAL', None),
+                    ('eps_bas_yoy', 'REAL', None),
+                    ('ebit', 'REAL', None),
+                    ('ebitda', 'REAL', None),
+                    ('ebit_inverse', 'REAL', None),
+                    ('ebitda_inverse', 'REAL', None),
+                    ('nr_prof_loss', 'REAL', None),
+                    ('net_prof_cut', 'REAL', None),
+                    ('gross_prof', 'REAL', None),
+                    ('oper_net_inc', 'REAL', None),
+                    ('val_chg_net_inc', 'REAL', None),
+                    ('exp_rd', 'REAL', None),
+                    ('ttl_inv_cptl', 'REAL', None),
+                    ('work_cptl', 'REAL', None),
+                    ('net_work_cptl', 'REAL', None),
+                    ('tg_asset', 'REAL', None),
+                    ('retain_inc', 'REAL', None),
+                    ('int_debt', 'REAL', None),
+                    ('net_debt', 'REAL', None),
+                    ('curr_liab_non_int', 'REAL', None),
+                    ('ncur_liab_non_int', 'REAL', None),
+                    ('fcff', 'REAL', None),
+                    ('fcfe', 'REAL', None),
+                    ('cur_depr_amort', 'REAL', None),
+                    ('eqy_mult_dupont', 'REAL', None),
+                    ('net_prof_pcom_np', 'REAL', None),
+                    ('net_prof_tp', 'REAL', None),
+                    ('ttl_prof_ebit', 'REAL', None),
+                    ('roe_cut_avg', 'REAL', None),
+                    ('roe_add', 'REAL', None),
+                    ('roe_ann', 'REAL', None),
+                    ('roa', 'REAL', None),
+                    ('roa_ann', 'REAL', None),
+                    ('jroa', 'REAL', None),
+                    ('jroa_ann', 'REAL', None),
+                    ('roic', 'REAL', None),
+                    ('sale_npm', 'REAL', None),
+                    ('sale_gpm', 'REAL', None),
+                    ('sale_cost_rate', 'REAL', None),
+                    ('sale_exp_rate', 'REAL', None),
+                    ('net_prof_toi', 'REAL', None),
+                    ('oper_prof_toi', 'REAL', None),
+                    ('ebit_toi', 'REAL', None),
+                    ('ttl_cost_oper_toi', 'REAL', None),
+                    ('exp_oper_toi', 'REAL', None),
+                    ('exp_admin_toi', 'REAL', None),
+                    ('exp_fin_toi', 'REAL', None),
+                    ('ast_impr_loss_toi', 'REAL', None),
+                    ('ebitda_toi', 'REAL', None),
+                    ('oper_net_inc_tp', 'REAL', None),
+                    ('val_chg_net_inc_tp', 'REAL', None),
+                    ('net_exp_noper_tp', 'REAL', None),
+                    ('inc_tax_tp', 'REAL', None),
+                    ('net_prof_cut_np', 'REAL', None),
+                    ('eqy_mult', 'REAL', None),
+                    ('curr_ast_ta', 'REAL', None),
+                    ('ncurr_ast_ta', 'REAL', None),
+                    ('tg_ast_ta', 'REAL', None),
+                    ('ttl_eqy_pcom_tic', 'REAL', None),
+                    ('int_debt_tic', 'REAL', None),
+                    ('curr_liab_tl', 'REAL', None),
+                    ('ncurr_liab_tl', 'REAL', None),
+                    ('ast_liab_rate', 'REAL', None),
+                    ('quick_rate', 'REAL', None),
+                    ('curr_rate', 'REAL', None),
+                    ('cons_quick_rate', 'REAL', None),
+                    ('liab_eqy_rate', 'REAL', None),
+                    ('ttl_eqy_pcom_tl', 'REAL', None),
+                    ('ttl_eqy_pcom_debt', 'REAL', None),
+                    ('tg_ast_tl', 'REAL', None),
+                    ('tg_ast_int_debt', 'REAL', None),
+                    ('tg_ast_net_debt', 'REAL', None),
+                    ('ebitda_tl', 'REAL', None),
+                    ('net_cf_oper_tl', 'REAL', None),
+                    ('net_cf_oper_int_debt', 'REAL', None),
+                    ('net_cf_oper_curr_liab', 'REAL', None),
+                    ('net_cf_oper_net_liab', 'REAL', None),
+                    ('ebit_int_cover', 'REAL', None),
+                    ('long_liab_work_cptl', 'REAL', None),
+                    ('ebitda_int_debt', 'REAL', None),
+                    ('oper_cycle', 'REAL', None),
+                    ('inv_turnover_days', 'REAL', None),
+                    ('acct_rcv_turnover_days', 'REAL', None),
+                    ('inv_turnover_rate', 'REAL', None),
+                    ('acct_rcv_turnover_rate', 'REAL', None),
+                    ('curr_ast_turnover_rate', 'REAL', None),
+                    ('fix_ast_turnover_rate', 'REAL', None),
+                    ('ttl_ast_turnover_rate', 'REAL', None),
+                    ('cash_rcv_sale_oi', 'REAL', None),
+                    ('net_cf_oper_oi', 'REAL', None),
+                    ('net_cf_oper_oni', 'REAL', None),
+                    ('cptl_exp_da', 'REAL', None),
+                    ('cash_rate', 'REAL', None),
+                    ('acct_pay_turnover_days', 'REAL', None),
+                    ('acct_pay_turnover_rate', 'REAL', None),
+                    ('net_oper_cycle', 'REAL', None),
+                    ('ttl_cost_oper_yoy', 'REAL', None),
+                    ('net_prof_yoy', 'REAL', None),
+                    ('net_cf_oper_np', 'REAL', None),
                 ],
             }
 
@@ -1744,7 +2075,7 @@ class DatabaseManager:
     # ============ 估值数据操作 ============
 
     def insert_valuation_data(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
-        """批量插入估值数据到 t_valuation_data 表 - 对齐东财 stk_get_daily_valuation_pt 返回字段"""
+        """批量插入估值数据到 t_valuation_data 表 - 对齐东财 stk_get_daily_valuation_pt 返回字段（35个估值指标）"""
         if df.empty:
             return 0
 
@@ -1763,17 +2094,15 @@ class DatabaseManager:
             if col not in df.columns:
                 logger.warning(f"估值数据缺少必要列: {col}")
                 return 0
-        # 东财 API 字段（对齐 stk_get_daily_valuation_pt + stk_get_daily_mktvalue_pt）
+        # 东财 stk_get_daily_valuation_pt 估值指标字段（32个）
         for col in ['pe_ttm', 'pe_lyr', 'pe_mrq', 'pe_1q', 'pe_2q', 'pe_3q',
                      'pe_ttm_cut', 'pe_lyr_cut', 'pe_mrq_cut',
                      'pe_1q_cut', 'pe_2q_cut', 'pe_3q_cut',
-                     'pb_lyr', 'pb_lf', 'pb_mrq',
+                     'pb_lyr', 'pb_mrq',
                      'pcf_ttm_oper', 'pcf_ttm_ncf', 'pcf_lyr_oper', 'pcf_lyr_ncf',
                      'ps_ttm', 'ps_lyr', 'ps_mrq', 'ps_1q', 'ps_2q', 'ps_3q',
                      'peg_lyr', 'peg_1q', 'peg_2q', 'peg_3q',
-                     'dy_ttm', 'dy_lfy',
-                     'market_cap', 'circ_market_cap', 'total_share', 'float_share',
-                     'total_mv', 'circ_mv']:
+                     'dy_ttm', 'dy_lfy']:
             if col not in df.columns:
                 df[col] = None
 
@@ -1790,30 +2119,26 @@ class DatabaseManager:
                         row.get('pe_1q'), row.get('pe_2q'), row.get('pe_3q'),
                         row.get('pe_ttm_cut'), row.get('pe_lyr_cut'), row.get('pe_mrq_cut'),
                         row.get('pe_1q_cut'), row.get('pe_2q_cut'), row.get('pe_3q_cut'),
-                        row.get('pb_lyr'), row.get('pb_lf'), row.get('pb_mrq'),
+                        row.get('pb_lyr'), row.get('pb_mrq'),
                         row.get('pcf_ttm_oper'), row.get('pcf_ttm_ncf'),
                         row.get('pcf_lyr_oper'), row.get('pcf_lyr_ncf'),
                         row.get('ps_ttm'), row.get('ps_lyr'), row.get('ps_mrq'),
                         row.get('ps_1q'), row.get('ps_2q'), row.get('ps_3q'),
-                        row.get('peg_lyr'), row.get('peg_1q'), row.get('peg_2q'), row.get('peg_3q'),
+                        row.get('peg_lyr'), row.get('peg_1q'),
+                        row.get('peg_2q'), row.get('peg_3q'),
                         row.get('dy_ttm'), row.get('dy_lfy'),
-                        row.get('market_cap'), row.get('circ_market_cap'),
-                        row.get('total_share'), row.get('float_share'),
-                        row.get('total_mv'), row.get('circ_mv'),
                     ))
                 cursor.executemany('''
                     INSERT OR REPLACE INTO t_valuation_data
                     (trade_date, stock_code, pe_ttm, pe_lyr, pe_mrq,
                      pe_1q, pe_2q, pe_3q, pe_ttm_cut, pe_lyr_cut, pe_mrq_cut,
                      pe_1q_cut, pe_2q_cut, pe_3q_cut,
-                     pb_lyr, pb_lf, pb_mrq,
+                     pb_lyr, pb_mrq,
                      pcf_ttm_oper, pcf_ttm_ncf, pcf_lyr_oper, pcf_lyr_ncf,
                      ps_ttm, ps_lyr, ps_mrq, ps_1q, ps_2q, ps_3q,
                      peg_lyr, peg_1q, peg_2q, peg_3q,
-                     dy_ttm, dy_lfy,
-                     market_cap, circ_market_cap, total_share, float_share,
-                     total_mv, circ_mv)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     dy_ttm, dy_lfy)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', rows)
                 count += len(rows)
 
@@ -1898,14 +2223,9 @@ class DatabaseManager:
     # ============ 指数成分股操作 ============
 
     def insert_index_constituent(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
-        """批量插入指数成分股/板块成分股数据"""
+        """批量插入指数成分股数据（来源：stk_get_index_constituents）"""
         if df.empty:
             return 0
-
-        df = df.copy()
-        # 兼容：如果传入 trade_date 列则忽略
-        if 'trade_date' in df.columns:
-            df = df.drop(columns=['trade_date'])
 
         with self.get_connection() as conn:
             count = 0
@@ -1915,11 +2235,12 @@ class DatabaseManager:
                 for _, row in batch.iterrows():
                     rows.append((
                         row.get('index_code'), row.get('stock_code'),
-                        row.get('weight'), row.get('market_cap'), row.get('pe_ratio'), row.get('pb_ratio')
+                        row.get('weight'), row.get('trade_date'),
+                        row.get('market_value_total'), row.get('market_value_circ')
                     ))
                 conn.cursor().executemany('''
                     INSERT OR REPLACE INTO t_stock_in_index
-                    (index_code, stock_code, weight, market_cap, pe_ratio, pb_ratio)
+                    (index_code, stock_code, weight, trade_date, market_value_total, market_value_circ)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', rows)
                 count += len(rows)
@@ -1946,13 +2267,18 @@ class DatabaseManager:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ) -> pd.DataFrame:
-        """获取指数成分股数据（兼容旧接口，忽略日期参数）"""
+        """获取指数成分股数据"""
         sql = 'SELECT * FROM t_stock_in_index WHERE index_code = ?'
         params = [index_code]
 
-        # 兼容：忽略日期参数（表已无 trade_date 列）
+        if start_date:
+            sql += ' AND trade_date >= ?'
+            params.append(start_date)
+        if end_date:
+            sql += ' AND trade_date <= ?'
+            params.append(end_date)
 
-        sql += ' ORDER BY weight DESC'
+        sql += ' ORDER BY trade_date DESC, weight DESC'
 
         with self.get_connection() as conn:
             df = pd.read_sql_query(sql, conn, params=params)
@@ -2974,6 +3300,96 @@ class DatabaseManager:
         logger.info(f"插入 {count} 条财务主要指标数据")
         return count
 
+    def insert_finance_deriv_data(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
+        """批量插入财务衍生指标数据 → t_finance_deriv
+
+        对齐东财 stk_get_finance_deriv / stk_get_finance_deriv_pt 返回字段（142个指标）。
+        """
+        if df is None or df.empty:
+            return 0
+
+        df = df.copy()
+        # 列名映射
+        col_map = {}
+        if 'symbol' in df.columns and 'stock_code' not in df.columns:
+            col_map['symbol'] = 'stock_code'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        # 确保必要列存在
+        for col in ['stock_code', 'rpt_date']:
+            if col not in df.columns:
+                df[col] = None
+        # 东财 stk_get_finance_deriv 完整字段（142个财务衍生指标）
+        deriv_fields = [
+            'pub_date', 'rpt_type', 'data_type',
+            'eps_basic', 'eps_dil2', 'eps_dil', 'eps_basic_cut', 'eps_dil2_cut', 'eps_dil_cut',
+            'bps', 'net_cf_oper_ps', 'ttl_inc_oper_ps', 'inc_oper_ps', 'ebit_ps',
+            'cptl_rsv_ps', 'sur_rsv_ps', 'retain_prof_ps', 'retain_inc_ps',
+            'net_cf_ps', 'fcff_ps', 'fcfe_ps', 'ebitda_ps',
+            'roe', 'roe_weight', 'roe_avg', 'roe_cut', 'roe_weight_cut', 'ocf_toi',
+            'eps_dil_yoy', 'net_cf_oper_ps_yoy', 'ttl_inc_oper_yoy', 'inc_oper_yoy',
+            'oper_prof_yoy', 'ttl_prof_yoy', 'net_prof_pcom_yoy', 'net_prof_pcom_cut_yoy',
+            'net_cf_oper_yoy', 'roe_yoy', 'net_asset_yoy', 'ttl_liab_yoy',
+            'ttl_asset_yoy', 'net_cash_flow_yoy', 'bps_gr_begin_year',
+            'ttl_asset_gr_begin_year', 'ttl_eqy_pcom_gr_begin_year',
+            'net_debt_eqy_ev', 'int_debt_eqy_ev', 'eps_bas_yoy',
+            'ebit', 'ebitda', 'ebit_inverse', 'ebitda_inverse',
+            'nr_prof_loss', 'net_prof_cut', 'gross_prof', 'oper_net_inc', 'val_chg_net_inc',
+            'exp_rd', 'ttl_inv_cptl', 'work_cptl', 'net_work_cptl', 'tg_asset', 'retain_inc',
+            'int_debt', 'net_debt', 'curr_liab_non_int', 'ncur_liab_non_int',
+            'fcff', 'fcfe', 'cur_depr_amort', 'eqy_mult_dupont',
+            'net_prof_pcom_np', 'net_prof_tp', 'ttl_prof_ebit',
+            'roe_cut_avg', 'roe_add', 'roe_ann', 'roa', 'roa_ann', 'jroa', 'jroa_ann', 'roic',
+            'sale_npm', 'sale_gpm', 'sale_cost_rate', 'sale_exp_rate',
+            'net_prof_toi', 'oper_prof_toi', 'ebit_toi', 'ttl_cost_oper_toi',
+            'exp_oper_toi', 'exp_admin_toi', 'exp_fin_toi', 'ast_impr_loss_toi', 'ebitda_toi',
+            'oper_net_inc_tp', 'val_chg_net_inc_tp', 'net_exp_noper_tp', 'inc_tax_tp',
+            'net_prof_cut_np', 'eqy_mult', 'curr_ast_ta', 'ncurr_ast_ta', 'tg_ast_ta',
+            'ttl_eqy_pcom_tic', 'int_debt_tic', 'curr_liab_tl', 'ncurr_liab_tl',
+            'ast_liab_rate', 'quick_rate', 'curr_rate', 'cons_quick_rate', 'liab_eqy_rate',
+            'ttl_eqy_pcom_tl', 'ttl_eqy_pcom_debt', 'tg_ast_tl', 'tg_ast_int_debt', 'tg_ast_net_debt',
+            'ebitda_tl', 'net_cf_oper_tl', 'net_cf_oper_int_debt',
+            'net_cf_oper_curr_liab', 'net_cf_oper_net_liab',
+            'ebit_int_cover', 'long_liab_work_cptl', 'ebitda_int_debt',
+            'oper_cycle', 'inv_turnover_days', 'acct_rcv_turnover_days',
+            'inv_turnover_rate', 'acct_rcv_turnover_rate',
+            'curr_ast_turnover_rate', 'fix_ast_turnover_rate', 'ttl_ast_turnover_rate',
+            'cash_rcv_sale_oi', 'net_cf_oper_oi', 'net_cf_oper_oni', 'cptl_exp_da', 'cash_rate',
+            'acct_pay_turnover_days', 'acct_pay_turnover_rate', 'net_oper_cycle',
+            'ttl_cost_oper_yoy', 'net_prof_yoy', 'net_cf_oper_np',
+        ]
+        for col in deriv_fields:
+            if col not in df.columns:
+                df[col] = None
+
+        # 构造 INSERT 列名和占位符
+        insert_cols = ['stock_code', 'pub_date', 'rpt_date', 'rpt_type', 'data_type'] + deriv_fields[3:]
+        placeholders = ', '.join(['?'] * len(insert_cols))
+        cols_str = ', '.join(insert_cols)
+
+        with self.get_connection() as conn:
+            count = 0
+            for i in range(0, len(df), batch_size):
+                batch = df.iloc[i:i + batch_size]
+                rows = []
+                for _, row in batch.iterrows():
+                    row_data = (
+                        row.get('stock_code'), row.get('pub_date'), row.get('rpt_date'),
+                        row.get('rpt_type'), row.get('data_type'),
+                    )
+                    for col in deriv_fields[3:]:
+                        row_data += (row.get(col),)
+                    rows.append(row_data)
+                conn.cursor().executemany(
+                    f'INSERT OR REPLACE INTO t_finance_deriv ({cols_str}) VALUES ({placeholders})',
+                    rows,
+                )
+                count += len(rows)
+
+        logger.info(f"插入 {count} 条财务衍生指标数据")
+        return count
+
     def insert_dividend_data(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
         """批量插入除权除息数据到 t_dividend_date 表 - 对齐东财 stk_get_dividend 返回字段"""
         if df is None or df.empty:
@@ -3102,6 +3518,52 @@ class DatabaseManager:
 
         return df
 
+    def get_finance_deriv(
+        self,
+        stock_codes: Optional[List[str]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        查询财务衍生指标数据
+
+        Parameters
+        ----------
+        stock_codes : list, optional
+            股票代码列表
+        start_date : str, optional
+            开始日期（按 rpt_date 过滤）
+        end_date : str, optional
+            结束日期（按 rpt_date 过滤）
+
+        Returns
+        -------
+        pd.DataFrame
+            财务衍生指标数据
+        """
+        sql = 'SELECT * FROM t_finance_deriv WHERE 1=1'
+        params = []
+
+        if stock_codes:
+            placeholders = ','.join(['?' for _ in stock_codes])
+            sql += f' AND stock_code IN ({placeholders})'
+            params.extend(stock_codes)
+
+        if start_date:
+            sql += ' AND rpt_date >= ?'
+            params.append(start_date)
+
+        if end_date:
+            sql += ' AND rpt_date <= ?'
+            params.append(end_date)
+
+        sql += ' ORDER BY stock_code, rpt_date'
+
+        with self.get_connection() as conn:
+            df = pd.read_sql_query(sql, conn, params=params)
+
+        return df
+
     # ============ 每日市值指标操作 ============
 
     def insert_stock_mktvalue(self, df: pd.DataFrame, batch_size: int = 5000) -> int:
@@ -3192,7 +3654,7 @@ class DatabaseManager:
                           'factor_registry', 't_finance_prime', 't_stock_pool', 't_stock_in_stock_pool',
                           't_trading_date', 't_dividend_date', 't_etf_info', 't_etf_daily',
                           't_sector_info', 't_stock_list_in_sector', 't_index_info',
-                          't_valuation_data', 't_stock_mktvalue']:
+                          't_valuation_data', 't_stock_mktvalue', 't_finance_deriv']:
                 cursor.execute(f'DELETE FROM {table}')
             logger.info("已清空所有数据")
 

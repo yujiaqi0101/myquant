@@ -177,7 +177,7 @@ class EastmoneySource(DataSource):
             start_time=start_time, end_time=end_time,
         )
 
-    def get_index_constituents(self, index_code: str, **kwargs) -> List[str]:
+    def get_index_constituents(self, index_code: str, **kwargs) -> pd.DataFrame:
         self._ensure_connected()
         return self._connector.get_index_constituents(
             index_code=index_code, trade_date=kwargs.get('trade_date'),
@@ -239,6 +239,127 @@ class EastmoneySource(DataSource):
             date=date,
         )
 
+    # ============ 财务衍生指标 ============
+
+    def get_finance_deriv_data(self, symbols: List[str], start_date: str = None,
+                                end_date: str = None, **kwargs) -> pd.DataFrame:
+        """
+        获取财务衍生指标截面数据（stk_get_finance_deriv_pt，多标的单日截面）
+
+        字段以 stk_get_finance_deriv 的字段为准（共142个财务衍生指标）。
+        接口每次最多请求20个字段，需要分批请求再合并（共8批：7批×20 + 1批×2）。
+
+        Parameters
+        ----------
+        symbols : List[str]
+            股票代码列表（内部格式 600000.SH）
+        start_date : str, optional
+            开始日期（未使用，保留接口兼容）
+        end_date : str, optional
+            结束日期，作为截面查询的 date 参数（YYYYMMDD 或 YYYY-MM-DD）
+        kwargs : dict
+            可通过 fields 自定义字段列表
+
+        Returns
+        -------
+        pd.DataFrame
+            合并后的财务衍生指标数据
+        """
+        self._ensure_connected()
+        em_symbols = SymbolConverter.batch_to_eastmoney(symbols) if symbols else []
+
+        # 财务衍生指标完整字段（对齐东财 stk_get_finance_deriv 文档，共142个字段）
+        all_fields = kwargs.get('fields', [
+            # 每股指标 (19)
+            'eps_basic', 'eps_dil2', 'eps_dil', 'eps_basic_cut', 'eps_dil2_cut', 'eps_dil_cut',
+            'bps', 'net_cf_oper_ps', 'ttl_inc_oper_ps', 'inc_oper_ps', 'ebit_ps',
+            'cptl_rsv_ps', 'sur_rsv_ps', 'retain_prof_ps', 'retain_inc_ps',
+            'net_cf_ps', 'fcff_ps', 'fcfe_ps', 'ebitda_ps',
+            # ROE系列 + 现金流比率 + 同比增长 (20)
+            'roe', 'roe_weight', 'roe_avg', 'roe_cut', 'roe_weight_cut', 'ocf_toi',
+            'eps_dil_yoy', 'net_cf_oper_ps_yoy', 'ttl_inc_oper_yoy', 'inc_oper_yoy',
+            'oper_prof_yoy', 'ttl_prof_yoy', 'net_prof_pcom_yoy', 'net_prof_pcom_cut_yoy',
+            'net_cf_oper_yoy', 'roe_yoy', 'net_asset_yoy', 'ttl_liab_yoy',
+            'ttl_asset_yoy', 'net_cash_flow_yoy',
+            # 增长率(年初) + 债务股权比 + EBIT/EBITDA + 利润 (20)
+            'bps_gr_begin_year', 'ttl_asset_gr_begin_year', 'ttl_eqy_pcom_gr_begin_year',
+            'net_debt_eqy_ev', 'int_debt_eqy_ev', 'eps_bas_yoy',
+            'ebit', 'ebitda', 'ebit_inverse', 'ebitda_inverse',
+            'nr_prof_loss', 'net_prof_cut', 'gross_prof', 'oper_net_inc', 'val_chg_net_inc',
+            'exp_rd', 'ttl_inv_cptl', 'work_cptl', 'net_work_cptl', 'tg_asset',
+            # 留存收益 + 债务 + 现金流 + 杜邦 + 利润比率 + ROA/ROIC (20)
+            'retain_inc', 'int_debt', 'net_debt', 'curr_liab_non_int', 'ncur_liab_non_int',
+            'fcff', 'fcfe', 'cur_depr_amort', 'eqy_mult_dupont',
+            'net_prof_pcom_np', 'net_prof_tp', 'ttl_prof_ebit',
+            'roe_cut_avg', 'roe_add', 'roe_ann', 'roa', 'roa_ann', 'jroa', 'jroa_ann', 'roic',
+            # 销售利润率 + 费用率 + EBITDA比率 (20)
+            'sale_npm', 'sale_gpm', 'sale_cost_rate', 'sale_exp_rate',
+            'net_prof_toi', 'oper_prof_toi', 'ebit_toi', 'ttl_cost_oper_toi',
+            'exp_oper_toi', 'exp_admin_toi', 'exp_fin_toi', 'ast_impr_loss_toi', 'ebitda_toi',
+            'oper_net_inc_tp', 'val_chg_net_inc_tp', 'net_exp_noper_tp', 'inc_tax_tp',
+            'net_prof_cut_np', 'eqy_mult', 'curr_ast_ta',
+            # 资产结构 + 负债结构 + 偿债能力 (20)
+            'ncurr_ast_ta', 'tg_ast_ta', 'ttl_eqy_pcom_tic', 'int_debt_tic',
+            'curr_liab_tl', 'ncurr_liab_tl', 'ast_liab_rate', 'quick_rate', 'curr_rate',
+            'cons_quick_rate', 'liab_eqy_rate', 'ttl_eqy_pcom_tl', 'ttl_eqy_pcom_debt',
+            'tg_ast_tl', 'tg_ast_int_debt', 'tg_ast_net_debt',
+            'ebitda_tl', 'net_cf_oper_tl', 'net_cf_oper_int_debt', 'net_cf_oper_curr_liab',
+            # 现金流/负债 + 利息保障 + 营业周期 + 周转率 (20)
+            'net_cf_oper_net_liab', 'ebit_int_cover', 'long_liab_work_cptl', 'ebitda_int_debt',
+            'oper_cycle', 'inv_turnover_days', 'acct_rcv_turnover_days',
+            'inv_turnover_rate', 'acct_rcv_turnover_rate',
+            'curr_ast_turnover_rate', 'fix_ast_turnover_rate', 'ttl_ast_turnover_rate',
+            'cash_rcv_sale_oi', 'net_cf_oper_oi', 'net_cf_oper_oni', 'cptl_exp_da', 'cash_rate',
+            'acct_pay_turnover_days', 'acct_pay_turnover_rate', 'net_oper_cycle',
+            'ttl_cost_oper_yoy',
+            # 同比增长率 (2)
+            'net_prof_yoy', 'net_cf_oper_np',
+        ])
+
+        # 如果传入的是逗号分隔字符串，转为列表
+        if isinstance(all_fields, str):
+            all_fields = [f.strip() for f in all_fields.split(',') if f.strip()]
+
+        # 截面查询日期：使用 end_date 作为 date 参数
+        date = kwargs.get('date')
+        if not date and end_date:
+            # YYYYMMDD -> YYYY-MM-DD
+            date = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}" if len(end_date) == 8 else end_date
+
+        # 分批：每批最多20个字段
+        batch_size = 20
+        merge_cols = ['symbol', 'pub_date', 'rpt_date']
+        # 只保留 merge_cols + 请求字段列，丢弃 API 额外返回列
+        keep_cols = set(merge_cols + all_fields)
+        result_df = None
+
+        for i in range(0, len(all_fields), batch_size):
+            batch_fields = all_fields[i:i + batch_size]
+            fields_str = ','.join(batch_fields)
+
+            df = self._connector.get_financial_deriv(
+                symbols=em_symbols,
+                fields=fields_str,
+                date=date,
+            )
+
+            if df is not None and not df.empty:
+                # 只保留需要的列，丢弃 API 额外返回列（如 data_type, rpt_type）
+                cols = [c for c in df.columns if c in keep_cols]
+                df = df[cols]
+                if result_df is None:
+                    result_df = df
+                else:
+                    # 按 symbol + pub_date + rpt_date 合并
+                    new_cols = [c for c in df.columns if c not in merge_cols]
+                    result_df = result_df.merge(
+                        df[merge_cols + new_cols],
+                        on=merge_cols,
+                        how='outer',
+                    )
+
+        return result_df if result_df is not None else pd.DataFrame()
+
     # ============ 估值 ============
 
     def get_valuation_data(self, symbols: List[str], start_date: str = None,
@@ -246,27 +367,84 @@ class EastmoneySource(DataSource):
         self._ensure_connected()
         em_symbols = SymbolConverter.batch_to_eastmoney(symbols) if symbols else None
 
-        # 估值指标完整字段（对齐东财 stk_get_daily_valuation_pt 文档）
-        # 每次最多请求 20 个字段，需要分批请求再合并
+        # 估值指标完整字段（对齐东财 stk_get_daily_valuation_pt）
+        # 每次最多请求 20 个字段，需要分批请求再合并（共30个指标字段）
         all_fields = kwargs.get('fields', ','.join([
-            # 第1批: PE/PB/PCF (20字段)
+            # 第1批: PE/PB/PCF (19字段)
             'pe_ttm', 'pe_lyr', 'pe_mrq', 'pe_1q', 'pe_2q', 'pe_3q',
             'pe_ttm_cut', 'pe_lyr_cut', 'pe_mrq_cut',
-            'pb_lyr', 'pb_mrq', 'pb_lyr_1', 'pb_mrq_1',
+            'pe_1q_cut', 'pe_2q_cut', 'pe_3q_cut',
+            'pb_lyr', 'pb_mrq',
             'pcf_ttm_oper', 'pcf_ttm_ncf', 'pcf_lyr_oper', 'pcf_lyr_ncf',
-            'ps_ttm', 'ps_lyr', 'ps_mrq',
-            # 第2批: PS/PEG/DY (16字段)
-            'ps_1q', 'ps_2q', 'ps_3q',
-            'peg_lyr', 'peg_mrq', 'peg_1q', 'peg_2q', 'peg_3q',
-            'peg_np_cgr', 'peg_npp_cgr',
+            # 第2批: PS/PEG/DY (11字段)
+            'ps_ttm', 'ps_lyr', 'ps_mrq', 'ps_1q', 'ps_2q', 'ps_3q',
+            'peg_lyr', 'peg_1q', 'peg_2q', 'peg_3q',
             'dy_ttm', 'dy_lfy',
         ]))
 
         return self._connector.get_daily_valuation_batch(
             symbols=em_symbols or [],
             fields=all_fields,
-            trade_date=kwargs.get('trade_date'),
+            start_date=start_date,
+            end_date=end_date,
         )
+
+    def get_daily_valuation_pt_data(self, symbols: List[str], trade_date: str,
+                                     **kwargs) -> pd.DataFrame:
+        """
+        获取单日估值指标截面数据（stk_get_daily_valuation_pt，多标的单日）
+
+        用于批量同步：按交易日遍历，每天一次请求获取所有标的数据。
+        注意：该接口每次最多请求20个字段，超过需分批请求再合并。
+        """
+        self._ensure_connected()
+        em_symbols = SymbolConverter.batch_to_eastmoney(symbols) if symbols else []
+
+        all_fields = kwargs.get('fields', [
+            # PE系列 (12)
+            'pe_ttm', 'pe_lyr', 'pe_mrq', 'pe_1q', 'pe_2q', 'pe_3q',
+            'pe_ttm_cut', 'pe_lyr_cut', 'pe_mrq_cut',
+            'pe_1q_cut', 'pe_2q_cut', 'pe_3q_cut',
+            # PB系列 (3)
+            'pb_lyr', 'pb_mrq',
+            # PCF系列 (4)
+            'pcf_ttm_oper', 'pcf_ttm_ncf', 'pcf_lyr_oper', 'pcf_lyr_ncf',
+            # PS系列 (6)
+            'ps_ttm', 'ps_lyr', 'ps_mrq',
+            'ps_1q', 'ps_2q', 'ps_3q',
+            # PEG系列 (4)
+            'peg_lyr', 'peg_1q', 'peg_2q', 'peg_3q',
+            # 股息率 (2)
+            'dy_ttm', 'dy_lfy',
+        ])
+
+        # 如果传入的是逗号分隔字符串，转为列表
+        if isinstance(all_fields, str):
+            all_fields = [f.strip() for f in all_fields.split(',') if f.strip()]
+
+        # 分批：每批最多20个字段
+        batch_size = 20
+        merge_cols = ['symbol', 'trade_date']
+        result_df = None
+
+        for i in range(0, len(all_fields), batch_size):
+            batch_fields = all_fields[i:i + batch_size]
+            fields_str = ','.join(batch_fields)
+
+            df = self._connector.get_daily_valuation_pt(
+                symbols=em_symbols,
+                fields=fields_str,
+                trade_date=trade_date,
+            )
+
+            if df is not None and not df.empty:
+                if result_df is None:
+                    result_df = df
+                else:
+                    # 按 symbol + trade_date 合并
+                    result_df = result_df.merge(df, on=merge_cols, how='outer')
+
+        return result_df if result_df is not None else pd.DataFrame()
 
     # ============ 除权除息 ============
 
@@ -305,19 +483,43 @@ class EastmoneySource(DataSource):
 
     # ============ 每日市值 ============
 
-    def get_daily_mktvalue_data(self, symbols: List[str], trade_date: str = None, **kwargs) -> pd.DataFrame:
-        """获取每日市值指标数据（stk_get_daily_mktvalue_pt 截面查询）"""
+    def get_daily_mktvalue_data(self, symbols: List[str], start_date: str = None,
+                                end_date: str = None, **kwargs) -> pd.DataFrame:
+        """获取每日市值指标数据（stk_get_daily_mktvalue 时序查询）"""
         self._ensure_connected()
         em_symbols = SymbolConverter.batch_to_eastmoney(symbols) if symbols else []
 
-        # 市值指标完整字段（对齐东财 stk_get_daily_mktvalue_pt 文档）
+        # 市值指标完整字段（对齐东财 stk_get_daily_mktvalue 文档）
         all_fields = kwargs.get('fields', ','.join([
             'tot_mv', 'tot_mv_csrc', 'a_mv', 'a_mv_ex_ltd',
             'b_mv', 'b_mv_ex_ltd', 'ev', 'ev_ex_curr',
             'ev_ebitda', 'equity_value',
         ]))
 
-        return self._connector.get_daily_mktvalue(
+        return self._connector.get_daily_mktvalue_batch(
+            symbols=em_symbols,
+            fields=all_fields,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def get_daily_mktvalue_pt_data(self, symbols: List[str], trade_date: str,
+                                    **kwargs) -> pd.DataFrame:
+        """
+        获取单日市值指标截面数据（stk_get_daily_mktvalue_pt，多标的单日）
+
+        用于批量同步：按交易日遍历，每天一次请求获取所有标的数据。
+        """
+        self._ensure_connected()
+        em_symbols = SymbolConverter.batch_to_eastmoney(symbols) if symbols else []
+
+        all_fields = kwargs.get('fields', ','.join([
+            'tot_mv', 'tot_mv_csrc', 'a_mv', 'a_mv_ex_ltd',
+            'b_mv', 'b_mv_ex_ltd', 'ev', 'ev_ex_curr',
+            'ev_ebitda', 'equity_value',
+        ]))
+
+        return self._connector.get_daily_mktvalue_pt(
             symbols=em_symbols,
             fields=all_fields,
             trade_date=trade_date,

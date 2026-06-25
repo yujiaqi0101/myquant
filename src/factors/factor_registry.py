@@ -28,9 +28,9 @@ class FactorCategory(Enum):
 
 class FactorSource(Enum):
     """因子数据来源枚举"""
-    VALUATION = "valuation"           # 估值接口（stk_get_daily_valuation_pt）
+    VALUATION = "valuation"           # 估值接口（stk_get_daily_valuation）
     FINANCIAL = "financial"           # 财务衍生接口（stk_get_finance_deriv_pt）
-    MKTVALUE = "mktvalue"             # 市值接口（stk_get_daily_mktvalue_pt）
+    MKTVALUE = "mktvalue"             # 市值接口（stk_get_daily_mktvalue）
 
 
 # 因子元数据注册表

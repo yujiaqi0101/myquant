@@ -13,13 +13,8 @@ from typing import Optional
 from .interactive import InteractiveMenu, prompt_input, prompt_confirm
 
 
-def _run_data_sync(start_date: str = None, end_date: str = None):
+def _run_data_sync(start_date: str = None, end_date: str = None, steps: list = None):
     """执行数据同步（通过 SourceRegistry 自动路由数据源）"""
-    start_date = start_date or prompt_input("起始日期", "20230101")
-    end_date = end_date or prompt_input("结束日期", "")
-
-    print(f"\n开始同步数据: {start_date} ~ {end_date or '最新'}")
-
     try:
         from src.data.database import DatabaseManager
         from src.data.data_sync import DataSynchronizer
@@ -29,16 +24,89 @@ def _run_data_sync(start_date: str = None, end_date: str = None):
         db = DatabaseManager(db_path)
         sync = DataSynchronizer(db)
 
+        # 步骤选择
+        if steps is None:
+            steps = _prompt_step_selection(sync.SYNC_STEPS)
+
+        if not steps:
+            print("未选择任何步骤，退出")
+            return
+
+        # 时间范围
+        start_date = start_date or prompt_input("起始日期", "20230101")
+        end_date = end_date or prompt_input("结束日期", "")
+
+        # 显示选择摘要
+        step_names = [f"{s}.{sync.SYNC_STEPS[s][0]}" for s in steps]
+        print(f"\n将执行步骤: {', '.join(step_names)}")
+        print(f"时间范围: {start_date} ~ {end_date or '最新'}")
+
         def progress_cb(step, current, total, msg=''):
             if msg:
                 print(f"  [{step}] {current}/{total} - {msg}")
             else:
                 print(f"  [{step}] {current}/{total}")
 
-        sync.sync_all(start_date=start_date, end_date=end_date, progress_callback=progress_cb)
+        if len(steps) == 16 and steps == list(range(1, 17)):
+            sync.sync_all(start_date=start_date, end_date=end_date, progress_callback=progress_cb)
+        else:
+            sync.sync_steps(steps=steps, start_date=start_date, end_date=end_date, progress_callback=progress_cb)
         print("\n✓ 数据同步完成")
     except Exception as e:
         print(f"同步失败: {e}")
+
+
+def _prompt_step_selection(sync_steps: dict) -> list:
+    """交互式选择同步步骤"""
+    print(f"\n{'=' * 50}")
+    print("[同步步骤选择]")
+    print(f"{'=' * 50}")
+    print("可用步骤：")
+    for step_num, (name, table, _, _) in sync_steps.items():
+        print(f"  {step_num:>2}. {name} → {table}")
+    print(f"{'=' * 50}")
+    print("输入说明：")
+    print("  - 输入 'all' 执行全部步骤")
+    print("  - 输入步骤号，用逗号分隔，如: 14,15")
+    print("  - 输入范围，如: 1-5")
+    print("  - 组合使用，如: 1-4,14,15")
+
+    while True:
+        raw = input("\n请选择步骤: ").strip()
+        if not raw:
+            return []
+
+        if raw.lower() == 'all':
+            return list(range(1, 17))
+
+        try:
+            steps = _parse_step_input(raw, sync_steps)
+            if steps:
+                return steps
+            print("未选择有效步骤，请重新输入")
+        except ValueError:
+            print("输入格式有误，请重新输入")
+
+
+def _parse_step_input(raw: str, sync_steps: dict) -> list:
+    """解析步骤输入，支持逗号分隔和范围"""
+    result = []
+    parts = [p.strip() for p in raw.split(',') if p.strip()]
+    for part in parts:
+        if '-' in part:
+            # 范围，如 1-5
+            bounds = part.split('-', 1)
+            start = int(bounds[0].strip())
+            end = int(bounds[1].strip())
+            for s in range(start, end + 1):
+                if s in sync_steps and s not in result:
+                    result.append(s)
+        else:
+            s = int(part)
+            if s in sync_steps and s not in result:
+                result.append(s)
+    result.sort()
+    return result
 
 
 def _run_data_validate():
@@ -160,6 +228,7 @@ def setup_data_parser(parser: argparse.ArgumentParser) -> None:
     sync_parser = subparsers.add_parser('sync', help='同步数据')
     sync_parser.add_argument('--start-date', help='起始日期 (YYYYMMDD)')
     sync_parser.add_argument('--end-date', help='结束日期 (YYYYMMDD)')
+    sync_parser.add_argument('--steps', help='指定步骤，如 14,15 或 1-5 或 all')
 
     # validate 子命令
     subparsers.add_parser('validate', help='校验数据完整性')
@@ -179,7 +248,14 @@ def run_data_command(args) -> None:
 
     cmd = args.data_command
     if cmd == 'sync':
-        _run_data_sync(start_date=args.start_date, end_date=args.end_date)
+        steps = None
+        if hasattr(args, 'steps') and args.steps:
+            from src.data.data_sync import DataSynchronizer
+            if args.steps.lower() == 'all':
+                steps = list(range(1, 17))
+            else:
+                steps = _parse_step_input(args.steps, DataSynchronizer.SYNC_STEPS)
+        _run_data_sync(start_date=args.start_date, end_date=args.end_date, steps=steps)
     elif cmd == 'validate':
         _run_data_validate()
     elif cmd == 'status':

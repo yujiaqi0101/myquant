@@ -203,12 +203,12 @@ def from_quantlab_db(
             df["trade_date"] = pd.to_datetime(df["trade_date"])
             df = df.set_index(["trade_date", "stock_code"])
 
-    # ---- 合并估值数据（pb / circ_mv）按 trade_date + stock_code join + ffill ----
+    # ---- 合并估值数据（pb）按 trade_date + stock_code join + ffill ----
     try:
         import sqlite3
         conn = sqlite3.connect(db_path)
         val_df = pd.read_sql_query(
-            "SELECT trade_date, stock_code, pb_mrq, circ_mv "
+            "SELECT trade_date, stock_code, pb_mrq "
             "FROM t_valuation_data "
             "WHERE trade_date >= ? AND trade_date <= ?",
             conn,
@@ -218,15 +218,14 @@ def from_quantlab_db(
         if not val_df.empty:
             val_df.rename(columns={
                 "pb_mrq": "pb",
-                "circ_mv": "market_cap",
             }, inplace=True)
             val_df["trade_date"] = pd.to_datetime(val_df["trade_date"])
             df = df.reset_index()
             df = df.merge(val_df, on=["trade_date", "stock_code"], how="left")
             # 按 stock_code 分组 ffill + bfill（估值数据可能只有部分日期有值）
             df = df.sort_values(["stock_code", "trade_date"])
-            df[["pb", "market_cap"]] = df.groupby("stock_code")[["pb", "market_cap"]].ffill()
-            df[["pb", "market_cap"]] = df.groupby("stock_code")[["pb", "market_cap"]].bfill()
+            df[["pb"]] = df.groupby("stock_code")[["pb"]].ffill()
+            df[["pb"]] = df.groupby("stock_code")[["pb"]].bfill()
             df = df.set_index(["trade_date", "stock_code"])
     except Exception:
         pass

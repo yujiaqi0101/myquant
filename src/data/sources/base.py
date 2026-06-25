@@ -100,9 +100,9 @@ class DataSource(ABC):
         """获取指数日K线数据"""
         return pd.DataFrame()
 
-    def get_index_constituents(self, index_code: str, **kwargs) -> List[str]:
-        """获取指数成分股"""
-        return []
+    def get_index_constituents(self, index_code: str, **kwargs) -> pd.DataFrame:
+        """获取指数成分股（含权重、市值）"""
+        return pd.DataFrame()
 
     # ============ 板块 ============
 
@@ -141,7 +141,8 @@ class DataSource(ABC):
 
     # ============ 每日市值 ============
 
-    def get_daily_mktvalue_data(self, symbols: List[str], trade_date: str = None, **kwargs) -> pd.DataFrame:
+    def get_daily_mktvalue_data(self, symbols: List[str], start_date: str = None,
+                                end_date: str = None, **kwargs) -> pd.DataFrame:
         """获取每日市值指标数据"""
         return pd.DataFrame()
 

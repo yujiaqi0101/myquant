@@ -30,6 +30,7 @@ DEFAULT_ROUTING = {
     'sector_info': 'tdx',
     'sector_constituents': 'tdx',
     'financial_data': 'eastmoney',
+    'finance_deriv_data': 'eastmoney',
     'daily_mktvalue': 'eastmoney',
     'valuation_data': 'eastmoney',
     'dividend_data': 'eastmoney',
