@@ -604,6 +604,7 @@ def main():
     from src.cli.data_cli import setup_data_parser, run_data_command
     from src.cli.factor_cli import setup_factor_parser, run_factor_command
     from src.cli.quantlab_cli import setup_quantlab_parser, run_quantlab_subcommand
+    from src.cli.trades_cli import setup_trades_parser, run_trades_command
     
     # config 子命令（配置管理）
     config_parser = subparsers.add_parser('config', help='配置管理（交互式/命令式）')
@@ -635,6 +636,10 @@ def main():
 
     # quantlab 子命令（Phase 6 新增：6 个子动作）
     setup_quantlab_parser(subparsers)
+    
+    # trades 子命令（历史交易记录导入与报表生成）
+    trades_parser = subparsers.add_parser('trades', help='交易记录管理（导入/验证/报表）')
+    setup_trades_parser(trades_parser)
     
     # 原有参数（向后兼容）
     parser.add_argument('--sync', action='store_true', help='仅同步数据（不运行分析）')
@@ -763,6 +768,9 @@ def main():
         except Exception:
             pass  # 非关键路径，不影响主流程
         run_quantlab_subcommand(args)
+        return
+    elif args.command == 'trades':
+        run_trades_command(args)
         return
     
     # 初始化日志

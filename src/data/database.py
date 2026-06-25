@@ -1250,6 +1250,35 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_valuation_date ON t_valuation_data(trade_date)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_valuation_code ON t_valuation_data(stock_code)')
 
+            # 券商历史交易记录表 - 存储从券商导出CSV导入的交易记录
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS t_broker_trade (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date DATE NOT NULL,
+                    trade_time VARCHAR(20),
+                    stock_code VARCHAR(20) NOT NULL,
+                    stock_name VARCHAR(100),
+                    trade_type VARCHAR(10) NOT NULL,
+                    price REAL NOT NULL,
+                    quantity REAL NOT NULL,
+                    amount REAL NOT NULL,
+                    commission REAL DEFAULT 0,
+                    stamp_tax REAL DEFAULT 0,
+                    transfer_fee REAL DEFAULT 0,
+                    other_fee REAL DEFAULT 0,
+                    total_fee REAL DEFAULT 0,
+                    net_amount REAL DEFAULT 0,
+                    broker VARCHAR(50),
+                    account VARCHAR(50),
+                    source_file VARCHAR(255),
+                    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, stock_code, price, quantity, trade_type)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_broker_trade_date ON t_broker_trade(trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_broker_trade_code ON t_broker_trade(stock_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_t_broker_trade_broker ON t_broker_trade(broker)')
+
             # ============ 确保关键表列齐全：补全因旧 schema 缺失的列 ============
             # 定义每个表所有列的完整定义（name, type, default）
             # 注意：CREATE TABLE IF NOT EXISTS 只会在表不存在时创建；
