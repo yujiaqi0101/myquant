@@ -473,6 +473,10 @@ class DataSynchronizer:
         """
         从 t_sync_data_log 查询指定表的最大同步日期。
 
+        注意：只信任 t_sync_data_log 中的记录，因为日志是在单表完整同步成功后
+        才刷新写入的。如果日志中无记录，说明该表从未成功完成过同步，应从
+        默认起始日期重新同步（INSERT OR REPLACE 可处理重复数据）。
+
         Parameters
         ----------
         table_name : str
@@ -492,12 +496,72 @@ class DataSynchronizer:
                 )
                 row = cursor.fetchone()
                 if row and row[0]:
-                    # data_date 格式 YYYY-MM-DD → YYYYMMDD
                     return str(row[0]).replace('-', '')
                 return ''
         except Exception as e:
             logger.warning(f"查询 {table_name} 最大同步日期失败: {e}")
             return ''
+
+    def _get_latest_trade_date(self, before_date: str = '') -> str:
+        """
+        获取 ≤ before_date 的最近交易日。
+
+        Parameters
+        ----------
+        before_date : str
+            参考日期，格式 YYYYMMDD；为空则取今天
+
+        Returns
+        -------
+        str
+            最近交易日，格式 YYYYMMDD
+        """
+        if not before_date:
+            before_date = datetime.now().strftime('%Y%m%d')
+        date_str = f"{before_date[:4]}-{before_date[4:6]}-{before_date[6:8]}"
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT MAX(trade_date) FROM t_trading_date WHERE trade_date <= ?',
+                (date_str,)
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                return str(row[0]).replace('-', '')
+            return before_date
+
+    def _calc_incremental_range(self, table_name: str, default_start: str = '20210101') -> tuple:
+        """
+        计算增量同步的日期范围。
+
+        Parameters
+        ----------
+        table_name : str
+            数据表名
+        default_start : str
+            无历史记录时的默认起始日期，格式 YYYYMMDD
+
+        Returns
+        -------
+        tuple
+            (s_date, e_date, has_data)，日期格式 YYYYMMDD；has_data=False 表示范围内无交易日需跳过
+        """
+        e_date = self._get_latest_trade_date()
+        s_date = self._get_max_sync_date(table_name)
+        if not s_date:
+            s_date = default_start
+            logger.info(f"{table_name} 无历史记录，从默认起始日期同步: {s_date} → {e_date}")
+        else:
+            logger.info(f"{table_name} 增量同步: {s_date} → {e_date}")
+
+        # 检查日期范围内是否有交易日
+        s_fmt = f"{s_date[:4]}-{s_date[4:6]}-{s_date[6:8]}"
+        e_fmt = f"{e_date[:4]}-{e_date[4:6]}-{e_date[6:8]}"
+        trade_dates = self.db.get_trade_dates(s_fmt, e_fmt)
+        if not trade_dates:
+            logger.info(f"{table_name} 日期范围内无交易日，跳过")
+            return s_date, e_date, False
+        return s_date, e_date, True
 
     def auto_sync(self, progress_callback=None) -> dict:
         """
@@ -530,11 +594,11 @@ class DataSynchronizer:
             同步结果汇总
         """
         start_time = datetime.now()
-        today = datetime.now().strftime('%Y%m%d')
-        logger.info(f"开始自动同步（增量模式），目标日期: {today}")
+        target_date = self._get_latest_trade_date()
+        logger.info(f"开始自动同步（增量模式），目标交易日: {target_date}")
 
         results = {
-            'target_date': today,
+            'target_date': target_date,
             'steps': {},
             'errors': [],
         }
@@ -578,13 +642,11 @@ class DataSynchronizer:
             # ---- 增量表：t_stock_in_index ----
             self._report_progress(progress_callback, 'index_constituents', 6, 14,
                                   '正在同步指数成分股（增量）...')
-            s_date = self._get_max_sync_date('t_stock_in_index')
-            if s_date:
-                logger.info(f"t_stock_in_index 增量同步: {s_date} → {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_stock_in_index')
+            if has_data:
+                r = self.sync_index_constituents(s_date, e_date)
             else:
-                s_date = today
-                logger.info(f"t_stock_in_index 无历史记录，同步当天: {today}")
-            r = self.sync_index_constituents(s_date, today)
+                r = {'count': 0, 'status': 'skipped'}
             results['steps']['index_constituents'] = r
             self._report_progress(progress_callback, 'index_constituents', 6, 14,
                                   f'指数成分股同步完成，共 {r.get("count", 0)} 条')
@@ -604,13 +666,11 @@ class DataSynchronizer:
             # ---- 增量表：t_stock_daily ----
             self._report_progress(progress_callback, 'stock_daily', 8, 14,
                                   '正在同步股票日频数据（增量）...')
-            s_date = self._get_max_sync_date('t_stock_daily')
-            if not s_date:
-                s_date = today
-                logger.info(f"t_stock_daily 无历史记录，同步当天: {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_stock_daily')
+            if has_data:
+                r = self.sync_stock_daily(stock_list, s_date, e_date, progress_callback)
             else:
-                logger.info(f"t_stock_daily 增量同步: {s_date} → {today}")
-            r = self.sync_stock_daily(stock_list, s_date, today, progress_callback)
+                r = {'records': 0, 'status': 'skipped'}
             results['steps']['stock_daily'] = r
             self._report_progress(progress_callback, 'stock_daily', 8, 14,
                                   f'股票日频数据同步完成，共 {r.get("records", 0)} 条')
@@ -618,13 +678,11 @@ class DataSynchronizer:
             # ---- 增量表：t_index_daily ----
             self._report_progress(progress_callback, 'index_daily', 9, 14,
                                   '正在同步指数日频数据（增量）...')
-            s_date = self._get_max_sync_date('t_index_daily')
-            if not s_date:
-                s_date = today
-                logger.info(f"t_index_daily 无历史记录，同步当天: {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_index_daily')
+            if has_data:
+                r = self.sync_index_daily(index_list, s_date, e_date, progress_callback)
             else:
-                logger.info(f"t_index_daily 增量同步: {s_date} → {today}")
-            r = self.sync_index_daily(index_list, s_date, today, progress_callback)
+                r = {'records': 0, 'status': 'skipped'}
             results['steps']['index_daily'] = r
             self._report_progress(progress_callback, 'index_daily', 9, 14,
                                   f'指数日频数据同步完成，共 {r.get("records", 0)} 条')
@@ -632,13 +690,11 @@ class DataSynchronizer:
             # ---- 增量表：t_etf_daily ----
             self._report_progress(progress_callback, 'etf_daily', 10, 14,
                                   '正在同步ETF日频数据（增量）...')
-            s_date = self._get_max_sync_date('t_etf_daily')
-            if not s_date:
-                s_date = today
-                logger.info(f"t_etf_daily 无历史记录，同步当天: {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_etf_daily')
+            if has_data:
+                r = self.sync_etf_daily(etf_list, s_date, e_date, progress_callback)
             else:
-                logger.info(f"t_etf_daily 增量同步: {s_date} → {today}")
-            r = self.sync_etf_daily(etf_list, s_date, today, progress_callback)
+                r = {'records': 0, 'status': 'skipped'}
             results['steps']['etf_daily'] = r
             self._report_progress(progress_callback, 'etf_daily', 10, 14,
                                   f'ETF日频数据同步完成，共 {r.get("records", 0)} 条')
@@ -646,13 +702,11 @@ class DataSynchronizer:
             # ---- 增量表：t_finance_prime ----
             self._report_progress(progress_callback, 'financial_data', 11, 14,
                                   '正在同步财务数据（增量）...')
-            s_date = self._get_max_sync_date('t_finance_prime')
-            if not s_date:
-                s_date = today
-                logger.info(f"t_finance_prime 无历史记录，同步当天: {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_finance_prime')
+            if has_data:
+                r = self.sync_financial_data(stock_list, s_date, e_date, progress_callback)
             else:
-                logger.info(f"t_finance_prime 增量同步: {s_date} → {today}")
-            r = self.sync_financial_data(stock_list, s_date, today, progress_callback)
+                r = {'count': 0, 'status': 'skipped'}
             results['steps']['financial_data'] = r
             self._report_progress(progress_callback, 'financial_data', 11, 14,
                                   f'财务数据同步完成，共 {r.get("count", 0)} 条')
@@ -660,13 +714,11 @@ class DataSynchronizer:
             # ---- 增量表：t_finance_deriv ----
             self._report_progress(progress_callback, 'finance_deriv_data', 12, 14,
                                   '正在同步财务衍生指标（增量）...')
-            s_date = self._get_max_sync_date('t_finance_deriv')
-            if not s_date:
-                s_date = today
-                logger.info(f"t_finance_deriv 无历史记录，同步当天: {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_finance_deriv')
+            if has_data:
+                r = self.sync_finance_deriv_data(stock_list, s_date, e_date, progress_callback)
             else:
-                logger.info(f"t_finance_deriv 增量同步: {s_date} → {today}")
-            r = self.sync_finance_deriv_data(stock_list, s_date, today, progress_callback)
+                r = {'count': 0, 'status': 'skipped'}
             results['steps']['finance_deriv_data'] = r
             self._report_progress(progress_callback, 'finance_deriv_data', 12, 14,
                                   f'财务衍生指标同步完成，共 {r.get("count", 0)} 条')
@@ -674,13 +726,11 @@ class DataSynchronizer:
             # ---- 增量表：t_stock_mktvalue ----
             self._report_progress(progress_callback, 'stock_mktvalue', 13, 14,
                                   '正在同步每日市值指标（增量）...')
-            s_date = self._get_max_sync_date('t_stock_mktvalue')
-            if not s_date:
-                s_date = today
-                logger.info(f"t_stock_mktvalue 无历史记录，同步当天: {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_stock_mktvalue')
+            if has_data:
+                r = self.sync_stock_mktvalue(stock_list, s_date, e_date)
             else:
-                logger.info(f"t_stock_mktvalue 增量同步: {s_date} → {today}")
-            r = self.sync_stock_mktvalue(stock_list, s_date, today)
+                r = {'count': 0, 'status': 'skipped'}
             results['steps']['stock_mktvalue'] = r
             self._report_progress(progress_callback, 'stock_mktvalue', 13, 14,
                                   f'每日市值指标同步完成，共 {r.get("count", 0)} 条')
@@ -688,13 +738,11 @@ class DataSynchronizer:
             # ---- 增量表：t_valuation_data ----
             self._report_progress(progress_callback, 'valuation_data', 14, 14,
                                   '正在同步估值数据（增量）...')
-            s_date = self._get_max_sync_date('t_valuation_data')
-            if not s_date:
-                s_date = today
-                logger.info(f"t_valuation_data 无历史记录，同步当天: {today}")
+            s_date, e_date, has_data = self._calc_incremental_range('t_valuation_data')
+            if has_data:
+                r = self.sync_valuation_data(stock_list, s_date, e_date)
             else:
-                logger.info(f"t_valuation_data 增量同步: {s_date} → {today}")
-            r = self.sync_valuation_data(stock_list, s_date, today)
+                r = {'count': 0, 'status': 'skipped'}
             results['steps']['valuation_data'] = r
             self._report_progress(progress_callback, 'valuation_data', 14, 14,
                                   f'估值数据同步完成，共 {r.get("count", 0)} 条')
@@ -1215,6 +1263,19 @@ class DataSynchronizer:
 
             # 写入数据库
             count = self.db.insert_index_info(df)
+
+            # 标记核心指数为需要同步（is_sync=1）
+            core_indices = list(self.KNOWN_INDEX_CODES)
+            marked_count = 0
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                for idx_code in core_indices:
+                    cursor.execute(
+                        'UPDATE t_index_info SET is_sync = 1 WHERE index_code = ?',
+                        (idx_code,)
+                    )
+                    marked_count += cursor.rowcount
+                logger.info(f"已标记 {marked_count} 个核心指数为需要同步")
 
             # 提取代码列表供后续步骤使用
             codes = df['index_code'].tolist() if 'index_code' in df.columns else []

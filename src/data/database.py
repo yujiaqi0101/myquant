@@ -2279,15 +2279,41 @@ class DatabaseManager:
 
     def get_index_constituent(
         self,
-        index_code: str
+        index_code: str,
+        trade_date: Optional[str] = None
     ) -> pd.DataFrame:
-        """获取某指数/板块的成分股"""
+        """
+        获取某指数/板块的成分股
+
+        Parameters
+        ----------
+        index_code : str
+            指数代码
+        trade_date : str, optional
+            指定交易日期（YYYY-MM-DD），若不指定则取最新日期的成分股
+
+        Returns
+        -------
+        pd.DataFrame
+            成分股数据，包含 stock_code, weight, trade_date 等列
+        """
         with self.get_connection() as conn:
-            df = pd.read_sql_query('''
-                SELECT * FROM t_stock_in_index
-                WHERE index_code = ?
-                ORDER BY weight DESC
-            ''', conn, params=[index_code])
+            if trade_date is None:
+                df = pd.read_sql_query('''
+                    SELECT * FROM t_stock_in_index
+                    WHERE index_code = ?
+                    AND trade_date = (
+                        SELECT MAX(trade_date) FROM t_stock_in_index
+                        WHERE index_code = ?
+                    )
+                    ORDER BY weight DESC
+                ''', conn, params=[index_code, index_code])
+            else:
+                df = pd.read_sql_query('''
+                    SELECT * FROM t_stock_in_index
+                    WHERE index_code = ? AND trade_date = ?
+                    ORDER BY weight DESC
+                ''', conn, params=[index_code, trade_date])
         return df
 
     def get_index_constituent_history(
@@ -3967,14 +3993,23 @@ class DatabaseManager:
             return -1
 
         stock_codes = constituents['stock_code'].tolist()
+        trade_date = constituents['trade_date'].iloc[0] if 'trade_date' in constituents.columns else ''
         if description is None:
-            description = f"从指数 {index_code} 导入，共 {len(stock_codes)} 只成分股"
+            description = f"从指数 {index_code} 导入（{trade_date}），共 {len(stock_codes)} 只成分股"
 
         # 创建股票池
         pool_id = self.create_t_stock_pool(pool_name, pool_code=index_code, description=description)
         if pool_id == -1:
-            # 股票池已存在，直接添加成员
+            # 股票池已存在，先清空旧成员
             pool_id = self.get_stock_pool_info(pool_name)['pool_id']
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM t_stock_in_stock_pool WHERE pool_id = ?', (pool_id,))
+                logger.info(f"清空股票池 {pool_name} 的旧成员")
+            # 更新描述
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('UPDATE t_stock_pool SET description = ? WHERE pool_id = ?', (description, pool_id))
 
         # 添加成员
         count = self.add_to_t_stock_pool(pool_name, stock_codes)

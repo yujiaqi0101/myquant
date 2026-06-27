@@ -13,6 +13,42 @@ from typing import Optional
 from .interactive import InteractiveMenu, prompt_input, prompt_confirm
 
 
+def _run_data_auto_sync():
+    """执行自动增量同步（全量表全量刷新，增量表从上次同步位置继续）"""
+    try:
+        from src.data.database import DatabaseManager
+        from src.data.data_sync import DataSynchronizer
+        from config.config import DATABASE_CONFIG
+
+        db_path = DATABASE_CONFIG.get('path')
+        db = DatabaseManager(db_path)
+        sync = DataSynchronizer(db)
+
+        def progress_cb(step, current, total, msg=''):
+            if msg:
+                print(f"  [{step}] {current}/{total} - {msg}")
+            else:
+                print(f"  [{step}] {current}/{total}")
+
+        print("\n开始自动增量同步...")
+        print("全量表（全量刷新）: 交易日历、股票信息、申万行业明细、ETF信息、指数信息")
+        print("增量表（从上次位置同步到今天）: 指数成分股、股票行情、指数行情、ETF行情、财务数据、财务衍生、市值、估值")
+        print()
+
+        result = sync.auto_sync(progress_callback=progress_cb)
+
+        if result['errors']:
+            print(f"\n✗ 同步完成，但有 {len(result['errors'])} 个错误:")
+            for err in result['errors']:
+                print(f"  - {err}")
+        else:
+            print("\n✓ 自动同步完成")
+    except Exception as e:
+        import traceback
+        print(f"自动同步失败: {e}")
+        traceback.print_exc()
+
+
 def _run_data_sync(start_date: str = None, end_date: str = None, steps: list = None):
     """执行数据同步（通过 SourceRegistry 自动路由数据源）"""
     try:
@@ -211,10 +247,11 @@ def _run_data_clear():
 def run_data_interactive():
     """运行数据管理交互式菜单"""
     menu = InteractiveMenu("数据管理")
-    menu.add_option('1', '同步数据', lambda: _run_data_sync())
-    menu.add_option('2', '校验数据完整性', _run_data_validate)
-    menu.add_option('3', '查看数据概览', _run_data_status)
-    menu.add_option('4', '清空数据', _run_data_clear)
+    menu.add_option('1', '自动增量同步（推荐）', _run_data_auto_sync)
+    menu.add_option('2', '自定义同步（指定日期/步骤）', lambda: _run_data_sync())
+    menu.add_option('3', '校验数据完整性', _run_data_validate)
+    menu.add_option('4', '查看数据概览', _run_data_status)
+    menu.add_option('5', '清空数据', _run_data_clear)
     menu.run()
 
 
@@ -224,8 +261,11 @@ def setup_data_parser(parser: argparse.ArgumentParser) -> None:
     """配置 data 子命令的参数"""
     subparsers = parser.add_subparsers(dest='data_command', help='数据管理子命令')
 
+    # auto-sync 子命令（自动增量同步）
+    subparsers.add_parser('auto-sync', help='自动增量同步（全量表全量刷新，增量表从上次位置同步到今天）')
+
     # sync 子命令
-    sync_parser = subparsers.add_parser('sync', help='同步数据')
+    sync_parser = subparsers.add_parser('sync', help='自定义同步（指定日期范围和步骤）')
     sync_parser.add_argument('--start-date', help='起始日期 (YYYYMMDD)')
     sync_parser.add_argument('--end-date', help='结束日期 (YYYYMMDD)')
     sync_parser.add_argument('--steps', help='指定步骤，如 14,15 或 1-5 或 all')
@@ -247,7 +287,9 @@ def run_data_command(args) -> None:
         return
 
     cmd = args.data_command
-    if cmd == 'sync':
+    if cmd == 'auto-sync':
+        _run_data_auto_sync()
+    elif cmd == 'sync':
         steps = None
         if hasattr(args, 'steps') and args.steps:
             from src.data.data_sync import DataSynchronizer
