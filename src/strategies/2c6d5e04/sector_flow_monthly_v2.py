@@ -44,7 +44,7 @@ class SectorFlowMonthlyV2(SignalStrategy):
         4. 月度调仓由 PortfolioConstructor 决定
     """
 
-    name = "sector_flow_monthly_v2"
+    name = "sector_flow_monthly"
     description = "申万行业资金流向策略 V2 (quantlab) - 行业资金流入排名 TopN"
 
     def __init__(

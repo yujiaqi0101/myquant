@@ -47,12 +47,25 @@ def setup_strategy_parser(parser: argparse.ArgumentParser):
 def run_strategy_command(args: argparse.Namespace):
     """执行策略管理命令"""
     
-    # 1. 自动发现策略
+    # 1. 自动发现 v2 策略（SignalStrategy，最新版本）
+    from src.quantlab_adapters import discover_v2_strategies, SignalStrategyRegistry
+    discover_v2_strategies('src.strategies')
+    
+    # 2. 自动发现 v1 策略（BaseStrategy，旧版本兼容）
     StrategyRegistry.auto_discover('src.strategies')
     
-    # 2. 列出所有策略
+    # 3. 列出所有策略（合并两个注册表，v2优先）
     if args.list:
-        strategies = StrategyRegistry.list_strategies()
+        # 合并策略列表：v2策略（最新版本）优先覆盖v1
+        all_strategies = {}
+        # 先加v1
+        for s in StrategyRegistry.list_strategies():
+            all_strategies[s['name']] = s
+        # 再加v2（v2会覆盖v1同名策略，因为是最新版本）
+        for s in SignalStrategyRegistry.list_strategies():
+            all_strategies[s['name']] = s
+        
+        strategies = sorted(all_strategies.values(), key=lambda x: x['name'])
         print("\n可用策略列表：")
         print("=" * 60)
         for s in strategies:
@@ -63,13 +76,22 @@ def run_strategy_command(args: argparse.Namespace):
         print("使用 'python main.py strategy --show <策略名>' 查看详情")
         return
     
-    # 3. 查看策略详情
+    # 4. 查看策略详情
     if args.show:
-        strategy_class = StrategyRegistry.get(args.show)
+        # 优先查找v2策略
+        strategy_class = SignalStrategyRegistry.get(args.show)
+        is_v2 = True
+        if strategy_class is None:
+            # 再找v1策略
+            strategy_class = StrategyRegistry.get(args.show)
+            is_v2 = False
+        
         if strategy_class is None:
             print(f"错误：未知策略 '{args.show}'")
-            available = [s['name'] for s in StrategyRegistry.list_strategies()]
-            print(f"可用策略: {', '.join(available)}")
+            v1_available = [s['name'] for s in StrategyRegistry.list_strategies()]
+            v2_available = [s['name'] for s in SignalStrategyRegistry.list_strategies()]
+            all_available = list(set(v1_available + v2_available))
+            print(f"可用策略: {', '.join(sorted(all_available))}")
             return
         
         # 获取策略文档字符串（类注释）
@@ -77,27 +99,37 @@ def run_strategy_command(args: argparse.Namespace):
         
         print(f"\n策略: {strategy_class.name or strategy_class.__name__}")
         print("=" * 60)
+        print(f"版本类型: {'quantlab (最新版本)' if is_v2 else 'myquant (旧版本)'}")
         print("\n【策略说明】")
         print(docstring)
         
-        # 显示参数模式
-        if args.params:
+        # 显示参数
+        if hasattr(strategy_class, 'get_param_schema'):
+            # v1策略
+            schema = strategy_class.get_param_schema()
             print("\n【参数说明】")
             print("-" * 40)
-            schema = strategy_class.get_param_schema()
-            for param_name, param_info in schema.items():
-                print(f"  {param_name}:")
-                print(f"    类型: {param_info['type']}")
-                print(f"    默认值: {param_info['default']}")
-                print(f"    说明: {param_info['description']}")
-                if 'min' in param_info:
-                    print(f"    范围: [{param_info['min']}, {param_info['max']}]")
-        else:
-            print(f"\n【默认参数】")
+            if args.params:
+                for param_name, param_info in schema.items():
+                    print(f"  {param_name}:")
+                    print(f"    类型: {param_info['type']}")
+                    print(f"    默认值: {param_info['default']}")
+                    print(f"    说明: {param_info['description']}")
+                    if 'min' in param_info:
+                        print(f"    范围: [{param_info['min']}, {param_info['max']}]")
+            else:
+                print("-" * 40)
+                for name, value in strategy_class.default_params.items():
+                    print(f"  {name}: {value}")
+                print("\n使用 '--params' 查看详细参数说明")
+        elif hasattr(strategy_class, 'default_params'):
+            # v2策略有default_params
+            print("\n【默认参数】")
             print("-" * 40)
             for name, value in strategy_class.default_params.items():
                 print(f"  {name}: {value}")
-            print("\n使用 '--params' 查看详细参数说明")
+        else:
+            print("\n【无默认参数】")
         
         print("=" * 60)
         return
@@ -349,50 +381,73 @@ def load_price_data(
 
 def _resolve_engine_choice(strategy_name: str, requested: str) -> str:
     """
-    根据策略名和用户选择，决定实际使用的引擎。
+    根据策略和用户选择，决定实际使用的引擎。
+    
+    版本规则：
+    - 版本号 v1/v2/v3... 只表示策略改造次数，与使用哪个引擎无关
+    - 默认auto模式：如果SignalStrategyRegistry中存在该策略（即有最新版本的v2+策略），
+      则使用quantlab引擎；否则使用myquant引擎运行v1策略
+    - 用户显式指定引擎时尊重用户选择
     返回 'myquant' | 'bar' | 'event' | 'vbt' | 'tick'
     """
+    from src.quantlab_adapters import SignalStrategyRegistry
+    
     if requested == "auto":
-        # 策略名以 _v2 结尾 → 走 quantlab；否则保留 myquant（兼容旧 v1）
-        if strategy_name.endswith("_v2"):
-            return "bar"  # quantlab BarEngine（默认）
+        # 优先查找SignalStrategy（最新版本），如果存在则走quantlab
+        if SignalStrategyRegistry.get(strategy_name) is not None:
+            return "vbt"  # quantlab VectorBTAdapter（默认，用户之前用的是vbt）
+        # 否则走myquant（兼容v1策略）
         return "myquant"
     return requested
 
 
-def _is_v2_strategy(strategy_name: str) -> bool:
-    """判断策略是否是 v2 (SignalStrategy)。"""
-    return strategy_name.endswith("_v2")
+def _is_quantlab_strategy(strategy_name: str) -> bool:
+    """判断策略是否是quantlab SignalStrategy（即是否有最新版本）。"""
+    from src.quantlab_adapters import SignalStrategyRegistry
+    return SignalStrategyRegistry.get(strategy_name) is not None
 
 
 def run_backtest_command(args: argparse.Namespace):
     """执行回测命令"""
 
-    # 0. 自动发现 v2 策略（SignalStrategy）
-    from src.quantlab_adapters import discover_v2_strategies
-    discover_v2_strategies("src.strategies")
+    strategy_name = args.strategy
 
-    # 1. 自动发现 v1 策略（BaseStrategy）
-    StrategyRegistry.auto_discover("src.strategies")
+    # 0. 按需加载目标策略（只加载用户指定的那个，不加载全部）
+    from src.quantlab_adapters import discover_v2_strategies, SignalStrategyRegistry
+    discover_v2_strategies("src.strategies", strategy_name=strategy_name)
+
+    # 1. 也检查v1注册表（只判断是否存在，不全量discover；v1的auto_discover在_run_myquant_backtest中按需调用）
+    # 先尝试从v2注册表获取
+    is_v2 = SignalStrategyRegistry.get(strategy_name) is not None
 
     # 2. 决定引擎
-    engine_choice = _resolve_engine_choice(args.strategy, args.engine)
+    engine_choice = _resolve_engine_choice(strategy_name, args.engine)
 
     # 3. 分发
-    if engine_choice == "myquant":
+    if engine_choice == "myquant" and not is_v2:
         # 走 myquant 自研引擎（兼容 v1 策略）
+        StrategyRegistry.auto_discover("src.strategies")
+        if StrategyRegistry.get(strategy_name) is None:
+            print(f"错误：未知策略 '{strategy_name}'")
+            # 需要列出所有可用策略时才全量discover
+            discover_v2_strategies("src.strategies")
+            StrategyRegistry.auto_discover("src.strategies")
+            v1_available = [s['name'] for s in StrategyRegistry.list_strategies()]
+            v2_available = [s['name'] for s in SignalStrategyRegistry.list_strategies()]
+            all_available = list(set(v1_available + v2_available))
+            print(f"可用策略: {', '.join(sorted(all_available))}")
+            return
         return _run_myquant_backtest(args)
     else:
-        # 走 quantlab 引擎（v2 策略 + 显式选择）
-        if not _is_v2_strategy(args.strategy):
-            # 用户显式选 quantlab，但策略是 v1 → 提示并自动 fallback
-            from src.quantlab_adapters import SignalStrategyRegistry
-            if SignalStrategyRegistry.get(args.strategy) is None:
-                print(
-                    f"[警告] 策略 '{args.strategy}' 是 v1 (BaseStrategy) 策略，"
-                    f"无法在 quantlab 引擎上运行。已自动切回 myquant BacktestEngine。"
-                )
-                return _run_myquant_backtest(args)
+        # 走 quantlab 引擎
+        if not is_v2:
+            # 用户显式选 quantlab，但策略只有v1版本 → 提示并自动 fallback
+            print(
+                f"[警告] 策略 '{strategy_name}' 只有v1 (BaseStrategy) 版本，"
+                f"无法在 quantlab 引擎上运行。已自动切回 myquant BacktestEngine。"
+            )
+            StrategyRegistry.auto_discover("src.strategies")
+            return _run_myquant_backtest(args)
         return _run_quantlab_backtest(args, engine_choice)
 
 
@@ -763,6 +818,9 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
     """
     from src.quantlab_adapters import (
         from_quantlab_db,
+        from_etf_db,
+        from_index_db,
+        from_mixed_db,
         to_myquant_result,
         SignalStrategyRegistry,
     )
@@ -784,6 +842,8 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
 
     # 2) 构造策略实例
     strategy = strategy_class()
+    # 读取策略声明的资产类型（默认 stock，向后兼容现有策略）
+    asset_class = getattr(strategy, "asset_class", "stock")
 
     # 3) 解析股票范围
     stock_codes: Optional[list] = None
@@ -803,26 +863,27 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
     if args.stocks:
         stock_codes = [s.strip() for s in args.stocks.split(",")]
 
-    # 4) 回测前数据完整性检查
-    from src.data.inspector import DataInspector
-    inspector = DataInspector(db)
-    inspect_report = inspector.inspect(
-        start_date=args.start_date,
-        end_date=args.end_date,
-        data_types=['stock_daily'],
-    )
-    for dtype, detail in inspect_report.items():
-        if detail.get('status') == 'warning':
-            missing_codes = list(detail.get('details', {}).keys())
-            if len(missing_codes) > 0:
-                print(f"[数据检查] {dtype}: {len(missing_codes)} 只股票数据缺失超过10%")
-                if len(missing_codes) <= 10:
-                    print(f"  缺失股票: {', '.join(missing_codes)}")
-                else:
-                    print(f"  缺失股票(前10): {', '.join(missing_codes[:10])}...")
-                print(f"  建议: 运行 python main.py data sync 补同步")
+    # 4) 回测前数据完整性检查（仅对 stock 资产类型执行 stock_daily 检查）
+    if asset_class == "stock":
+        from src.data.inspector import DataInspector
+        inspector = DataInspector(db)
+        inspect_report = inspector.inspect(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            data_types=['stock_daily'],
+        )
+        for dtype, detail in inspect_report.items():
+            if detail.get('status') == 'warning':
+                missing_codes = list(detail.get('details', {}).keys())
+                if len(missing_codes) > 0:
+                    print(f"[数据检查] {dtype}: {len(missing_codes)} 只股票数据缺失超过10%")
+                    if len(missing_codes) <= 10:
+                        print(f"  缺失股票: {', '.join(missing_codes)}")
+                    else:
+                        print(f"  缺失股票(前10): {', '.join(missing_codes[:10])}...")
+                    print(f"  建议: 运行 python main.py data sync 补同步")
 
-    # 5) 加载数据（含预热期，与 v1 对齐）
+    # 5) 加载数据（含预热期，与 v1 对齐）—— 按策略 asset_class 路由
     from datetime import timedelta
     import time
 
@@ -830,22 +891,55 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
     start_dt = pd.Timestamp(args.start_date)
     warmup_start = (start_dt - timedelta(days=int(warmup_days * 1.5 + 10))).strftime("%Y-%m-%d")
 
-    print(f"[quantlab/{engine_choice}] 数据加载：")
+    print(f"[quantlab/{engine_choice}] 数据加载（asset_class={asset_class}）：")
     print(f"  预热期: {warmup_start} ~ {args.start_date}")
     print(f"  回测期: {args.start_date} ~ {args.end_date}")
     if pool_name:
         print(f"  股票池: {pool_name} ({len(stock_codes)} 只)")
     elif stock_codes:
-        print(f"  股票列表: {len(stock_codes)} 只")
+        print(f"  标的列表: {len(stock_codes)} 只")
 
     t0 = time.time()
-    data = from_quantlab_db(
-        db_path=_get_db_path(),
-        start_date=warmup_start,
-        end_date=args.end_date,
-        stock_codes=stock_codes,
-        db=db,
-    )
+    if asset_class == "etf":
+        # ETF 数据加载：从 t_etf_daily + t_etf_info 读取
+        data = from_etf_db(
+            db_path=_get_db_path(),
+            start_date=warmup_start,
+            end_date=args.end_date,
+            etf_codes=stock_codes,
+            db=db,
+        )
+    elif asset_class == "index":
+        # 指数数据加载：从 t_index_daily + t_index_info 读取
+        data = from_index_db(
+            db_path=_get_db_path(),
+            start_date=warmup_start,
+            end_date=args.end_date,
+            index_codes=stock_codes,
+            db=db,
+        )
+    elif asset_class == "mixed":
+        # 多资产混合加载（为两层策略搭路，需要策略提供更具体的 codes）
+        # 当前简化处理：mixed 模式下 --stocks 同时传给 etf/stock/index
+        # 未来两层策略可自行扩展解析逻辑
+        data = from_mixed_db(
+            db_path=_get_db_path(),
+            start_date=warmup_start,
+            end_date=args.end_date,
+            etf_codes=stock_codes,
+            stock_codes=stock_codes,
+            index_codes=stock_codes,
+            db=db,
+        )
+    else:
+        # 默认 stock：个股数据加载（保持向后兼容）
+        data = from_quantlab_db(
+            db_path=_get_db_path(),
+            start_date=warmup_start,
+            end_date=args.end_date,
+            stock_codes=stock_codes,
+            db=db,
+        )
     print(f"  加载完成: {len(data)} 个 symbol, 耗时 {time.time() - t0:.1f}s")
 
     if not data:
@@ -949,9 +1043,15 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
     with open(result_dir / "trades.json", "w", encoding="utf-8") as f:
         json.dump(trades_data, f, indent=2, ensure_ascii=False)
 
-    snapshots_data = [
-        {
-            "date": s.date.strftime("%Y-%m-%d"),
+    snapshots_data = []
+    for s in result.daily_snapshots:
+        # 处理NaT日期（无效快照）
+        date_val = s.date
+        if pd.isna(date_val):
+            continue
+        date_str = date_val.strftime("%Y-%m-%d") if hasattr(date_val, 'strftime') else str(date_val)
+        snapshots_data.append({
+            "date": date_str,
             "cash": s.cash,
             "position_value": s.position_value,
             "total_value": s.total_value,
@@ -960,9 +1060,7 @@ def _run_quantlab_backtest(args: argparse.Namespace, engine_choice: str):
             "daily_return": s.daily_return,
             "drawdown": s.drawdown,
             "max_drawdown": s.max_drawdown,
-        }
-        for s in result.daily_snapshots
-    ]
+        })
     with open(result_dir / "snapshots.json", "w", encoding="utf-8") as f:
         json.dump(snapshots_data, f, indent=2, ensure_ascii=False)
 

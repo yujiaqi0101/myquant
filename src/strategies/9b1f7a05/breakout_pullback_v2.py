@@ -41,7 +41,7 @@ class BreakoutPullbackV2(SignalStrategy):
         3. signal ∈ {0, 1}：1=满足条件想做多，0=不持有
     """
 
-    name = "breakout_pullback_v2"
+    name = "breakout_pullback"
     description = "突破回踩策略 V2 (quantlab) - 突破后回踩均线做多"
 
     def __init__(

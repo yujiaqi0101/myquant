@@ -50,7 +50,7 @@ class SmallCapV2(SignalStrategy):
     signal ∈ {0, 1}：1=满足选股条件想买，0=不持有。
     """
 
-    name = "small_cap_v2"
+    name = "small_cap"
     description = "小市值策略 V2 (quantlab) - 月度调仓等权 TopN"
 
     def __init__(
@@ -63,6 +63,7 @@ class SmallCapV2(SignalStrategy):
         min_momentum: float = -0.10,
         min_listed_days: int = 60,
         vol_period: int = 20,
+        rebalance_at: str = "month_start",
     ):
         # 参数全部为基本类型（int / float / bool / str），可 JSON 序列化
         self.top_n = int(top_n)
@@ -73,6 +74,7 @@ class SmallCapV2(SignalStrategy):
         self.min_momentum = float(min_momentum)
         self.min_listed_days = int(min_listed_days)
         self.vol_period = int(vol_period)
+        self.rebalance_at = str(rebalance_at)  # month_start / month_end / week_start / daily
 
         # 入参合理性校验（启动即失败，不要在 .signal() 跑一半才崩）
         if self.top_n < 1:
@@ -90,6 +92,8 @@ class SmallCapV2(SignalStrategy):
             raise ValueError(f"vol_period must be >= 2, got {vol_period}")
         if self.min_listed_days < 0:
             raise ValueError(f"min_listed_days must be >= 0, got {min_listed_days}")
+        if self.rebalance_at not in ("month_start", "month_end", "week_start", "daily"):
+            raise ValueError(f"rebalance_at must be one of month_start/month_end/week_start/daily, got {rebalance_at}")
 
     # ------------------------------------------------------------------ #
     # SignalStrategy 接口
@@ -99,13 +103,51 @@ class SmallCapV2(SignalStrategy):
         ctx,
     ) -> pd.DataFrame:
         # 多标的遍历，严格保持 ctx.data.keys() 顺序
+        # 先计算每只股票的每日分数
         out: dict[str, pd.Series] = {}
         for sym in ctx.data:
             out[sym] = self._signal_one(ctx, sym)
 
-        # 完整 DataFrame(date × symbol)，整型（int8）节省内存
-        df = pd.DataFrame(out).astype("int8")
+        df = pd.DataFrame(out)
+
+        # 根据调仓频率，非调仓日设为 NaN（引擎会理解为"不操作，继续持有"）
+        # 调仓逻辑由策略控制，引擎不包含任何策略逻辑
+        rebalance_dates = self._get_rebalance_dates(df.index)
+        non_rebalance_mask = ~df.index.isin(rebalance_dates)
+        if self.rebalance_at != "daily":
+            df.loc[non_rebalance_mask, :] = float('nan')
+
         return df
+
+    def _get_rebalance_dates(self, index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+        """根据rebalance_at参数识别调仓日"""
+        dates = pd.Series(index, index=index)
+
+        if self.rebalance_at == "daily":
+            return index
+        elif self.rebalance_at == "month_start":
+            # 每月第一个交易日：月份变化的第一天
+            months = dates.dt.month
+            years = dates.dt.year
+            is_month_start = (months != months.shift(1)) | (years != years.shift(1))
+            is_month_start.iloc[0] = True  # 第一天一定是调仓日
+            return index[is_month_start.fillna(True)]
+        elif self.rebalance_at == "month_end":
+            # 每月最后一个交易日：下一天月份不同
+            months = dates.dt.month
+            years = dates.dt.year
+            is_month_end = (months != months.shift(-1)) | (years != years.shift(-1))
+            is_month_end.iloc[-1] = True  # 最后一天一定是调仓日
+            return index[is_month_end.fillna(True)]
+        elif self.rebalance_at == "week_start":
+            # 每周第一个交易日（周一是一周开始，但周一可能休市，所以找每周的第一个交易日）
+            weeks = dates.dt.isocalendar().week.astype(int)
+            years = dates.dt.isocalendar().year.astype(int)
+            is_week_start = (weeks != weeks.shift(1)) | (years != years.shift(1))
+            is_week_start.iloc[0] = True
+            return index[is_week_start.fillna(True)]
+        else:
+            return index
 
     # ------------------------------------------------------------------ #
     # 单标逻辑（私有）
@@ -118,12 +160,12 @@ class SmallCapV2(SignalStrategy):
         df = ctx.data[sym]
 
         if len(df) < self.vol_period + 1:
-            return pd.Series(0, index=df.index, dtype="int8")
+            return pd.Series(0.0, index=df.index, dtype="float64")
 
         # ---- 1. 有效板块 ----
         prefix = str(sym).split(".")[0][:2]
         if prefix not in _VALID_BOARD_PREFIXES:
-            return pd.Series(0, index=df.index, dtype="int8")
+            return pd.Series(0.0, index=df.index, dtype="float64")
 
         # ---- 2. 流通市值 < max ----
         mc = df["market_cap"] if "market_cap" in df.columns else pd.Series(float("nan"), index=df.index)
@@ -134,12 +176,12 @@ class SmallCapV2(SignalStrategy):
         amt_ok = amt > self.min_amount * 1e4
 
         # ---- 4. N 日波动率 < max ----
-        ret = df["close"].pct_change()
+        ret = df["close"].pct_change(fill_method=None)
         vol = ret.rolling(self.vol_period).std()
         vol_ok = vol < self.max_vol
 
         # ---- 5. N 日涨幅 >= min ----
-        mom = df["close"].pct_change(self.vol_period)
+        mom = df["close"].pct_change(self.vol_period, fill_method=None)
         mom_ok = mom >= self.min_momentum
 
         # ---- 6. 上市天数（可选，缺列跳过）----
@@ -149,13 +191,21 @@ class SmallCapV2(SignalStrategy):
                 if first_valid is not None:
                     n_bars = len(df.loc[first_valid:])
                     if n_bars < self.min_listed_days:
-                        return pd.Series(0, index=df.index, dtype="int8")
+                        return pd.Series(0.0, index=df.index, dtype="float64")
             except Exception:
                 pass
 
         # ---- 综合选股条件：全 AND ----
         qualified = (mc_ok & amt_ok & vol_ok & mom_ok).fillna(False)
-        return qualified.astype("int8")
+        
+        # 合格股票输出正数分数：(max_market_cap*1e8 - market_cap)，这样：
+        #   - 分数始终为正（因为mc < max_market_cap*1e8）
+        #   - 市值越小分数越高，TopN降序排列时优先选小市值
+        # 不合格输出 0
+        score = pd.Series(0.0, index=df.index, dtype="float64")
+        max_mc_val = self.max_market_cap * 1e8
+        score[qualified] = max_mc_val - mc[qualified]
+        return score
 
 
 # ---------------------------------------------------------------------- #
@@ -170,6 +220,7 @@ def make_small_cap_v2(
     min_momentum: float = -0.10,
     min_listed_days: int = 60,
     vol_period: int = 20,
+    rebalance_at: str = "month_start",
 ) -> SmallCapV2:
     """显式工厂：避免某些调用方依赖默认参数顺序。"""
     return SmallCapV2(
@@ -181,13 +232,14 @@ def make_small_cap_v2(
         min_momentum=min_momentum,
         min_listed_days=min_listed_days,
         vol_period=vol_period,
+        rebalance_at=rebalance_at,
     )
 
 
 # ---------------------------------------------------------------------- #
 # 典型参数网格（给 Optimizer / ParallelOptimizer 用）
 # ---------------------------------------------------------------------- #
-SMALL_CAP_PARAM_SPACE: dict = {
+PARAM_SPACE: dict = {
     # 持仓数：等权 TopN
     "top_n":              [10, 20, 30, 50],
     # 市值范围（亿）
@@ -203,4 +255,6 @@ SMALL_CAP_PARAM_SPACE: dict = {
     "min_listed_days":    [60, 120, 250],
     # 波动 / 动量周期
     "vol_period":         [10, 20, 30],
+    # 调仓频率
+    "rebalance_at":       ["month_start", "month_end", "week_start"],
 }

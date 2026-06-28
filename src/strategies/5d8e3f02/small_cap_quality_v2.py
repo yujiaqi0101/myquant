@@ -43,7 +43,7 @@ class SmallCapQualityV2(SignalStrategy):
     signal ∈ {0, 1}：1=基本面过关+小市值，0=不持有。
     """
 
-    name = "small_cap_quality_v2"
+    name = "small_cap_quality"
     description = "小盘股质量策略 V2 (quantlab) - 质量因子+小市值，月度调仓"
 
     def __init__(

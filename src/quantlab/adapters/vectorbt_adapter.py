@@ -143,7 +143,7 @@ class VectorBTAdapter(BaseBacktestEngine):
             strategy.signal(ctx)
         )
 
-        # 2) 调 constructor，构造 weights_df
+        # 2) 调 constructor，构造 weights_df (目标权重，0~1，所有列和=1)
         weights_df: pd.DataFrame = (
             self._build_weights_df(
                 signal=signal,
@@ -151,60 +151,43 @@ class VectorBTAdapter(BaseBacktestEngine):
             )
         )
 
-        # 3) per-symbol 调 from_orders
-        #    VBT 的 from_order 只能对单 symbol
-        #    所以 per-symbol 跑一次
-        #    然后再合并 equity
-        n_symbols = max(len(data), 1)
-        per_symbol_cash = (
-            self._init_cash / n_symbols
+        # 3) 构建 close DataFrame 和 size DataFrame（多资产组合一次性回测）
+        #    对齐所有 symbol 的索引
+        symbols = list(data.keys())
+        
+        # 使用pd.concat构建close_df，避免DataFrame碎片化
+        close_series_list = []
+        for sym in symbols:
+            close_s = data[sym]['close'].rename(sym)
+            close_series_list.append(close_s)
+        close_df = pd.concat(close_series_list, axis=1)
+        close_df = close_df.reindex(weights_df.index)
+        
+        # size_df = weights_df：NaN表示"不操作，继续持有"，非NaN表示调仓到目标权重
+        # 策略通过在非调仓日输出NaN来控制调仓频率
+        size_df = weights_df.reindex(columns=symbols)
+
+        # 4) 使用vbt多资产组合回测（共享资金，目标权重模式）
+        #    allow_partial=True：允许部分成交。
+        #    若设为 False，当目标仓位100%但加上手续费/滑点后资金略不足时，
+        #    vbt 会直接放弃整笔订单（ETF 低价标的 + 满仓场景必中此坑）。
+        pf = vbt.Portfolio.from_orders(
+            close=close_df,
+            size=size_df,
+            size_type='targetpercent',
+            fees=self._fees,
+            slippage=self._slippage,
+            init_cash=self._init_cash,
+            cash_sharing=True,
+            freq="D",
+            allow_partial=True,
         )
 
-        portfolios = {}
-
-        for sym in data:
-
-            # VBT 内部对 close / size 做 Series 比较
-            # 必须保持同样的 DatetimeIndex
-            # 否则 "Can only compare identically-labeled Series objects"
-            #
-            # 关键：
-            #   - close 带 DatetimeIndex（pd.Series）
-            #   - size 用相同 index 转 pd.Series
-            close_index = (
-                data[sym]["close"].index
-            )
-
-            close = pd.Series(
-                data[sym]["close"].to_numpy(),
-                index=close_index,
-            )
-
-            # size: 该 symbol 的权重序列
-            # 用 close 同样的 DatetimeIndex
-            size = pd.Series(
-                weights_df[sym]
-                .reindex(close_index)
-                .fillna(0.0)
-                .to_numpy(),
-                index=close_index,
-            )
-
-            pf = vbt.Portfolio.from_orders(
-                close=close,
-                size=size,
-                fees=self._fees,
-                slippage=self._slippage,
-                init_cash=per_symbol_cash,
-                freq="D",
-            )
-
-            portfolios[sym] = pf
-
         return self._build_result(
-            portfolios=portfolios,
+            pf=pf,
             signal=signal,
             weights_df=weights_df,
+            symbols=symbols,
         )
 
     def _build_weights_df(
@@ -217,8 +200,10 @@ class VectorBTAdapter(BaseBacktestEngine):
         # 调 constructor.construct(scores, ts)
         # 累积成 weights_df
         #
-        # 这就是"组合权重策略"
-        # 不再是"单资产信号策略"
+        # 约定：
+        #   - 如果某天所有 scores 都是 NaN → 该日不调仓，所有 weights 设为 NaN
+        #     （vbt 遇到 NaN size 不会下单，继续持有现有仓位）
+        #   - 否则，NaN 的 symbol 视为 0（不持有），正常计算权重
 
         symbols = list(signal.columns)
         weights = {
@@ -231,13 +216,32 @@ class VectorBTAdapter(BaseBacktestEngine):
 
             scores = row.to_dict()
 
+            # 检查是否全部为 NaN（策略表示"今天不调仓"）
+            valid_scores = [
+                v for v in scores.values()
+                if v is not None and not (isinstance(v, float) and pd.isna(v))
+            ]
+            if not valid_scores:
+                # 全 NaN → 不操作，所有 symbol 权重设为 NaN
+                for sym in symbols:
+                    weights[sym].append(float('nan'))
+                timestamps.append(ts)
+                continue
+
+            # 正常计算目标权重（NaN score 视为 0）
+            clean_scores = {}
+            for s, v in scores.items():
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    clean_scores[s] = 0.0
+                else:
+                    clean_scores[s] = v
+
             target = constructor.construct(
-                scores=scores,
+                scores=clean_scores,
                 timestamp=ts,
             )
 
             for sym in symbols:
-
                 weights[sym].append(
                     target.weights.get(sym, 0.0)
                 )
@@ -255,9 +259,10 @@ class VectorBTAdapter(BaseBacktestEngine):
 
     def _build_result(
         self,
-        portfolios,
+        pf,
         signal,
         weights_df,
+        symbols,
     ):
 
         from ..analytics import (
@@ -266,20 +271,21 @@ class VectorBTAdapter(BaseBacktestEngine):
             max_drawdown,
         )
 
-        # 合并 equity（按 bar 加和）
-        equities = []
-        for sym, pf in portfolios.items():
+        # 获取组合净值曲线
+        equity = pf.value()
+        if hasattr(equity, "values"):
+            equity_values = equity.values
+        else:
+            equity_values = equity
+        equity_list = list(equity_values)
 
-            v = pf.value()
+        # 时间戳来自weights_df的索引
+        timestamps = list(weights_df.index)
 
-            if hasattr(v, "values"):
+        # 获取交易次数
+        trade_count = len(pf.trades.records_readable)
 
-                v = v.values
-
-            equities.append(v)
-
-        if not equities:
-
+        if not equity_list:
             return BacktestResult(
                 equity_curve=[],
                 total_return=0.0,
@@ -289,51 +295,36 @@ class VectorBTAdapter(BaseBacktestEngine):
                 win_rate=0.0,
                 final_equity=0.0,
                 source="vectorbt",
-                raw={"portfolios": {}},
+                raw={"portfolio": pf},
                 signal=signal,
                 weights_df=weights_df,
-                error=(
-                    "no portfolios to combine"
-                ),
+                timestamps=timestamps,
+                error="no equity to combine",
             )
-
-        min_len = min(
-            len(v) for v in equities
-        )
-        combined = [
-            sum(
-                equities[k][i]
-                for k in range(len(equities))
-            )
-            for i in range(min_len)
-        ]
-
-        trade_count = sum(
-            len(pf.trades.records_readable)
-            for pf in portfolios.values()
-        )
 
         return BacktestResult(
-            equity_curve=combined,
+            equity_curve=equity_list,
             total_return=round(
-                total_return(combined) * 100, 2
+                total_return(equity_list) * 100, 2
             ),
             sharpe=round(
-                sharpe_ratio(combined), 3
+                sharpe_ratio(equity_list), 3
             ),
             max_drawdown=round(
-                max_drawdown(combined) * 100, 2
+                max_drawdown(equity_list) * 100, 2
             ),
             trade_count=trade_count,
             win_rate=0.0,
             final_equity=round(
-                combined[-1], 2
+                equity_list[-1], 2
             ),
             source="vectorbt",
             raw={
-                "portfolios": portfolios,
+                "portfolio": pf,
                 "signal": signal,
             },
             signal=signal,
             weights_df=weights_df,
+            timestamps=timestamps,
+            portfolio=pf,
         )

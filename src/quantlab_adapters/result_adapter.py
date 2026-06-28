@@ -102,7 +102,7 @@ def to_myquant_result(
                 cash=cash,
                 position_value=position_value,
                 total_value=equity,
-                n_positions=_count_open_positions(ql, i),
+                n_positions=_count_open_positions(ql, i, portfolio, timestamps[i] if i < len(timestamps) else None),
                 daily_pnl=daily_pnl,
                 daily_return=daily_return,
                 drawdown=dd,
@@ -110,10 +110,70 @@ def to_myquant_result(
             )
         )
 
-    # ---- 2) tradebook.closed_trades → TradeRecord[] ----
+    # ---- 2) trades → TradeRecord[] ----
+    # 支持两种来源：
+    #   a) quantlab原生tradebook（ql.tradebook）
+    #   b) vectorbt Portfolio对象（ql.portfolio，即vbt.Portfolio）
     trades: list = []
+    
+    # 先尝试从vbt Portfolio提取
+    portfolio = ql.portfolio
+    if portfolio is not None and hasattr(portfolio, 'trades') and hasattr(portfolio.trades, 'records_readable'):
+        # vectorbt 路径：从pf.trades.records_readable提取
+        try:
+            trades_df = portfolio.trades.records_readable
+            if trades_df is not None and len(trades_df) > 0:
+                for _, row in trades_df.iterrows():
+                    try:
+                        symbol = str(row.get('Column', ''))
+                        size = _safe_float(row.get('Size', 0))
+                        if size <= 0:
+                            continue
+                        entry_dt = pd.Timestamp(row['Entry Timestamp'])
+                        exit_dt = pd.Timestamp(row['Exit Timestamp'])
+                        entry_price = _safe_float(row.get('Avg Entry Price', 0))
+                        exit_price = _safe_float(row.get('Avg Exit Price', 0))
+                        pnl = _safe_float(row.get('PnL', 0))
+                        qty = int(abs(size))
+                        
+                        # 开仓
+                        trades.append(
+                            TradeRecord(
+                                date=entry_dt,
+                                stock_code=symbol,
+                                direction=Direction.LONG,
+                                action="open",
+                                price=entry_price,
+                                quantity=qty,
+                                commission=0.0,
+                                slippage=0.0,
+                                pnl=0.0,
+                                reason="rebalance",
+                            )
+                        )
+                        # 平仓
+                        trades.append(
+                            TradeRecord(
+                                date=exit_dt,
+                                stock_code=symbol,
+                                direction=Direction.LONG,
+                                action="close",
+                                price=exit_price,
+                                quantity=qty,
+                                commission=0.0,
+                                slippage=0.0,
+                                pnl=pnl,
+                                reason="rebalance",
+                            )
+                        )
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning(f"从vbt portfolio提取交易记录失败: {e}")
+    
+    # quantlab原生tradebook路径
     tradebook = ql.tradebook
-    if tradebook is not None:
+    if tradebook is not None and len(trades) == 0:
         # rebuild() 后 closed_trades / closed_trades_by_symbol 都有
         try:
             tradebook.rebuild()
@@ -226,11 +286,28 @@ def to_myquant_result(
     )
 
 
-def _count_open_positions(ql, i: int) -> int:
+def _count_open_positions(ql, i: int, portfolio=None, ts=None) -> int:
     """
-    粗略估算当日持仓数量：从 position_qty 拿最后一根 bar 的非 0 持仓数。
+    估算当日持仓数量：
+    1. 优先从vbt Portfolio获取（如果portfolio是vbt.Portfolio）
+    2. 否则从 ql.position_qty 拿
     """
-    pq = ql.position_qty
+    # 先尝试vbt portfolio
+    if portfolio is not None and hasattr(portfolio, 'positions'):
+        try:
+            # 使用持仓记录：在给定时间点的持仓数
+            # vbt的positions.records可以获取每个时间点的持仓
+            if hasattr(portfolio, 'position_mask'):
+                mask = portfolio.position_mask
+                if mask is not None and i < len(mask):
+                    # position_mask是布尔DataFrame，True表示该日该标的有持仓
+                    row = mask.iloc[i] if hasattr(mask, 'iloc') else mask[i]
+                    return int(row.sum()) if hasattr(row, 'sum') else 0
+        except Exception:
+            pass
+    
+    # 回退到ql.position_qty
+    pq = getattr(ql, 'position_qty', None)
     if not isinstance(pq, dict) or not pq:
         return 0
     count = 0

@@ -5,7 +5,15 @@ QuantLab 适配器模块
 提供策略元数据管理、最佳表现自动提炼等功能。
 """
 
-from .data_adapter import from_quantlab_db, to_quantlab_dict
+from .data_adapter import (
+    from_quantlab_db,
+    to_quantlab_dict,
+    from_etf_db,
+    from_index_db,
+    from_mixed_db,
+    get_index_constituents,
+    get_etf_constituents,
+)
 from .strategy_registry import SignalStrategyRegistry, discover_v2_strategies
 from .best_perf_updater import BestPerfUpdater, ensure_best_perf_fresh
 from .result_adapter import to_myquant_result

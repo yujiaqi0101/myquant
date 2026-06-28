@@ -41,7 +41,7 @@ class NorthboundTimingV2(SignalStrategy):
         3. 月度调仓（具体 rebalance 逻辑交 PortfolioConstructor 决定）
     """
 
-    name = "northbound_timing_v2"
+    name = "northbound_timing"
     description = "北向资金择时策略 V2 (quantlab) - 北向净流入阈值选股"
 
     def __init__(

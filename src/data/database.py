@@ -63,7 +63,12 @@ class DatabaseManager:
             conn.close()
 
     def _init_database(self):
-        """初始化数据库：创建表和索引"""
+        """初始化数据库：创建表和索引（同一db_path只执行一次）"""
+        db_key = str(self.db_path.resolve())
+        if db_key in DatabaseManager._initialized_paths:
+            return
+        DatabaseManager._initialized_paths.add(db_key)
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
@@ -217,6 +222,28 @@ class DatabaseManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_index ON t_stock_in_index(index_code)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_constituent_stock ON t_stock_in_index(stock_code)')
+
+            # ETF 成分股表（数据来源：未来 data auto-sync 流程扩展）
+            # 【实事求是原则】ETF 成分股 ≠ 指数成分股：
+            #   - 完全复制型 ETF 与指数成分股理论一致，但申赎/分红等原因可能有微小差异
+            #   - 抽样复制型 ETF 只选取部分成分股，权重可能调整
+            #   - 优化复制型 ETF 通过优化算法选取成分股，与指数有显著差异
+            # 绝不借用 t_stock_in_index 代替 t_stock_in_etf
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS t_stock_in_etf (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    etf_code VARCHAR(20) NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
+                    weight REAL,
+                    trade_date VARCHAR(20),
+                    market_value REAL,
+                    shares REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(etf_code, stock_code, trade_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_constituent_etf ON t_stock_in_etf(etf_code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_constituent_stock ON t_stock_in_etf(stock_code)')
 
             # 申万行业分类明细表
             cursor.execute('''

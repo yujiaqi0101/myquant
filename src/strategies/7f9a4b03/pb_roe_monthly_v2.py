@@ -45,7 +45,7 @@ class PbRoeMonthlyV2(SignalStrategy):
     signal ∈ {0, 1}：1=双优可买，0=不持有。
     """
 
-    name = "pb_roe_monthly_v2"
+    name = "pb_roe_monthly"
     description = "PB+ROE 月度轮动策略 V2 (quantlab) - 双优度+小市值，月度调仓"
 
     def __init__(

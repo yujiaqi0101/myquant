@@ -34,7 +34,7 @@ import pandas as pd
 from src.cli.backtest_cli import (
     _get_db_path,
     _resolve_engine_choice,
-    _is_v2_strategy,
+    _is_quantlab_strategy,
 )
 from src.quantlab_adapters import (
     from_quantlab_db,
@@ -178,6 +178,34 @@ def _get_strategy_params(strategy) -> dict:
     return params
 
 
+def _get_param_space_from_strategy(strategy_class) -> Optional[dict]:
+    """
+    从策略类所在模块读取模块级 PARAM_SPACE 变量。
+
+    策略文件（如 small_cap_v2.py）一般在文件末尾定义 PARAM_SPACE: dict
+    作为该策略的典型参数网格，供 Optimizer / ParallelOptimizer 使用。
+
+    注意：策略类通过 importlib.util.module_from_spec 动态加载，但加载时
+    未注册到 sys.modules（见 strategy_registry.discover_v2_strategies），
+    因此 inspect.getmodule(strategy_class) 会返回 None。
+    这里改用 strategy_class.__init__.__globals__ 直接拿到模块 globals 字典，
+    再 .get("PARAM_SPACE") 读取。
+
+    Returns
+    -------
+    dict or None
+        存在则返回参数空间 dict；不存在或读取失败返回 None。
+    """
+    # __init__.__globals__ 是定义该类的模块的 globals 字典
+    init_method = getattr(strategy_class, "__init__", None)
+    if init_method is None:
+        return None
+    module_globals = getattr(init_method, "__globals__", None)
+    if module_globals is None:
+        return None
+    return module_globals.get("PARAM_SPACE", None)
+
+
 def _build_quantlab_engine(engine_choice: str, strategy, initial_capital: float):
     """构造 quantlab 引擎实例（与 backtest_cli 共用）。"""
     from src.quantlab.execution import (
@@ -271,11 +299,21 @@ def setup_run_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _load_v2_strategy(strategy_name: str):
+    """按需加载单个v2策略；若找不到则全量加载以便列出可用策略。返回策略类或None。"""
+    discover_v2_strategies("src.strategies", strategy_name=strategy_name)
+    strategy_class = SignalStrategyRegistry.get(strategy_name)
+    if strategy_class is None:
+        # 全量加载后重试
+        discover_v2_strategies("src.strategies")
+        strategy_class = SignalStrategyRegistry.get(strategy_name)
+    return strategy_class
+
+
 def run_quantlab_command(args: argparse.Namespace) -> None:
     """执行 quantlab run 子命令。"""
-    # 1) 加载 v2 策略
-    discover_v2_strategies("src.strategies")
-    strategy_class = SignalStrategyRegistry.get(args.strategy)
+    # 1) 按需加载 v2 策略
+    strategy_class = _load_v2_strategy(args.strategy)
     if strategy_class is None:
         print(f"错误：未知 v2 策略 '{args.strategy}'")
         print(
@@ -384,9 +422,8 @@ def compare_quantlab_command(args: argparse.Namespace) -> None:
     """多引擎对比：同一策略在多个引擎上跑，对比核心指标。"""
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
 
-    # 加载 v2 策略
-    discover_v2_strategies("src.strategies")
-    strategy_class = SignalStrategyRegistry.get(args.strategy)
+    # 按需加载 v2 策略
+    strategy_class = _load_v2_strategy(args.strategy)
     if strategy_class is None:
         print(f"错误：未知 v2 策略 '{args.strategy}'")
         return
@@ -496,8 +533,11 @@ def setup_optimize_parser(parser: argparse.ArgumentParser) -> None:
     _setup_engine_args(parser)
     _setup_output_args(parser)
     parser.add_argument(
-        "--param-space", required=True,
-        help="参数空间 JSON 字符串，如 '{\"top_n\":[10,20],\"min_amount\":[200,500]}'",
+        "--param-space", default=None,
+        help=(
+            "参数空间 JSON 字符串，如 '{\"top_n\":[10,20],\"min_amount\":[200,500]}'；"
+            "不传则尝试读取策略模块内的 PARAM_SPACE 变量"
+        ),
     )
     parser.add_argument(
         "--scorer", default="sharpe",
@@ -516,21 +556,40 @@ def setup_optimize_parser(parser: argparse.ArgumentParser) -> None:
 
 def optimize_quantlab_command(args: argparse.Namespace) -> None:
     """参数网格搜索。"""
-    discover_v2_strategies("src.strategies")
-    strategy_class = SignalStrategyRegistry.get(args.strategy)
+    strategy_class = _load_v2_strategy(args.strategy)
     if strategy_class is None:
         print(f"错误：未知 v2 策略 '{args.strategy}'")
         return
 
-    # 解析参数空间
-    try:
-        param_space = json.loads(args.param_space)
-    except json.JSONDecodeError as e:
-        print(f"错误: --param-space 解析失败: {e}")
-        return
-    if not isinstance(param_space, dict) or not param_space:
-        print("错误: --param-space 必须是 dict，如 '{\"top_n\":[10,20]}'")
-        return
+    # 解析参数空间：优先 --param-space，否则从策略模块读取 PARAM_SPACE
+    param_space = None
+    if args.param_space:
+        # 用户显式传入 JSON 字符串
+        try:
+            param_space = json.loads(args.param_space)
+        except json.JSONDecodeError as e:
+            print(f"错误: --param-space 解析失败: {e}")
+            return
+        if not isinstance(param_space, dict) or not param_space:
+            print("错误: --param-space 必须是 dict，如 '{\"top_n\":[10,20]}'")
+            return
+        print(f"  使用 --param-space 传入的参数空间")
+    else:
+        # 未传 --param-space，尝试从策略类所在模块读取 PARAM_SPACE
+        param_space = _get_param_space_from_strategy(strategy_class)
+        if param_space is None:
+            print(
+                f"错误: 策略 '{args.strategy}' 未定义 PARAM_SPACE，"
+                f"请使用 --param-space 指定参数空间，或在策略文件中定义 PARAM_SPACE"
+            )
+            return
+        if not isinstance(param_space, dict) or not param_space:
+            print(
+                f"错误: 策略 '{args.strategy}' 的 PARAM_SPACE 必须是非空 dict，"
+                f"如 {{\"top_n\":[10,20]}}"
+            )
+            return
+        print(f"  使用策略内置 PARAM_SPACE（来自 {strategy_class.__module__}）")
 
     # 股票范围
     try:
@@ -654,8 +713,7 @@ def setup_walkforward_parser(parser: argparse.ArgumentParser) -> None:
 
 def walkforward_quantlab_command(args: argparse.Namespace) -> None:
     """Walk-Forward 验证。"""
-    discover_v2_strategies("src.strategies")
-    strategy_class = SignalStrategyRegistry.get(args.strategy)
+    strategy_class = _load_v2_strategy(args.strategy)
     if strategy_class is None:
         print(f"错误：未知 v2 策略 '{args.strategy}'")
         return
