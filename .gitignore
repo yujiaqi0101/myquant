@@ -20,9 +20,11 @@ env/
 *.db
 *.db-shm
 *.db-wal
+*.db.bak
 /data/*.db
 /data/*.db-shm
 /data/*.db-wal
+/data/*.db.bak
 
 # 报告输出（运行时生成）
 reports/
@@ -74,7 +76,7 @@ cython_debug/
 # 临时测试文件
 tests/test4.py
 tests/test6.py
-AGENTS.MD
+AGENTS.md
 
 # 临时脚本/重构过程产物
 *modified*.py
