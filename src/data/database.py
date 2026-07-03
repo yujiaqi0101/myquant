@@ -1234,6 +1234,95 @@ class DatabaseManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_best_perf_id ON strategy_best_perf(strategy_id)')
 
+            # ============ 模拟交易模块表（Paper Trading） ============
+            # 5 张表用于存储模拟交易的资金账户、持仓、订单、成交与每日净值快照
+
+            # 模拟账户表 - 记录各策略账户的资金状态
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS paper_accounts (
+                    strategy_id VARCHAR(32) PRIMARY KEY,
+                    strategy_name VARCHAR(100) NOT NULL,
+                    version VARCHAR(20) NOT NULL,
+                    initial_capital DOUBLE NOT NULL,
+                    cash DOUBLE NOT NULL,
+                    frozen_cash DOUBLE NOT NULL DEFAULT 0.0,
+                    total_value DOUBLE NOT NULL,
+                    peak_value DOUBLE NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 模拟持仓表 - 记录当前各策略的个股持仓
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS paper_positions (
+                    strategy_id VARCHAR(32) NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
+                    direction VARCHAR(10) NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    entry_price DOUBLE NOT NULL,
+                    entry_date TEXT NOT NULL,
+                    current_price DOUBLE NOT NULL,
+                    value DOUBLE NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (strategy_id, stock_code)
+                )
+            ''')
+
+            # 模拟订单表 - 记录策略每日生成的买卖申请订单
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS paper_orders (
+                    order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id VARCHAR(32) NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
+                    direction VARCHAR(10) NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    price_type VARCHAR(20) NOT NULL,
+                    reason TEXT,
+                    status VARCHAR(20) NOT NULL,
+                    created_date TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_orders_strategy ON paper_orders(strategy_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_orders_status ON paper_orders(status)')
+
+            # 模拟成交记录表 - 记录已经模拟成交的流水
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS paper_trades (
+                    trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id INTEGER,
+                    strategy_id VARCHAR(32) NOT NULL,
+                    stock_code VARCHAR(20) NOT NULL,
+                    direction VARCHAR(10) NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    price DOUBLE NOT NULL,
+                    amount DOUBLE NOT NULL,
+                    commission DOUBLE NOT NULL,
+                    slippage DOUBLE NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_trades_strategy ON paper_trades(strategy_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_trades_date ON paper_trades(trade_date)')
+
+            # 模拟净值快照表 - 记录每日收盘后结算的账户净值
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS paper_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id VARCHAR(32) NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    cash DOUBLE NOT NULL,
+                    position_value DOUBLE NOT NULL,
+                    total_value DOUBLE NOT NULL,
+                    daily_return DOUBLE NOT NULL,
+                    max_drawdown DOUBLE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(strategy_id, trade_date)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_snapshots_strategy ON paper_snapshots(strategy_id)')
+
             # 估值数据表 - 对齐东财 stk_get_daily_valuation_pt 返回字段（35个估值指标）
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS t_valuation_data (
@@ -4190,3 +4279,250 @@ class DatabaseManager:
             description=description,
             is_active=1,
         )
+
+    # ============ 模拟交易（Paper Trading）CRUD 接口 ============
+    # 以下方法供 PaperTradingEngine / PaperTradingOrchestrator 使用，
+    # 操作 paper_accounts / paper_positions / paper_orders /
+    # paper_trades / paper_snapshots 五张表。
+
+    def get_paper_account(self, strategy_id: str) -> Optional[Dict]:
+        """读取指定策略的模拟账户状态，不存在返回 None"""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                'SELECT * FROM paper_accounts WHERE strategy_id = ?',
+                (strategy_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def save_paper_account(self, account: Dict) -> None:
+        """
+        保存（upsert）模拟账户状态。
+
+        account 字段：strategy_id, strategy_name, version, initial_capital,
+        cash, frozen_cash, total_value, peak_value
+        """
+        with self.get_connection() as conn:
+            conn.execute('''
+                INSERT INTO paper_accounts
+                    (strategy_id, strategy_name, version, initial_capital,
+                     cash, frozen_cash, total_value, peak_value)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(strategy_id) DO UPDATE SET
+                    strategy_name=excluded.strategy_name,
+                    version=excluded.version,
+                    initial_capital=excluded.initial_capital,
+                    cash=excluded.cash,
+                    frozen_cash=excluded.frozen_cash,
+                    total_value=excluded.total_value,
+                    peak_value=excluded.peak_value,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (
+                account['strategy_id'], account['strategy_name'], account['version'],
+                account['initial_capital'], account['cash'], account['frozen_cash'],
+                account['total_value'], account['peak_value'],
+            ))
+
+    def get_paper_positions(self, strategy_id: str) -> List[Dict]:
+        """读取指定策略的全部持仓"""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                'SELECT * FROM paper_positions WHERE strategy_id = ?',
+                (strategy_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def save_paper_position(self, position: Dict) -> None:
+        """
+        保存（upsert）单条持仓。
+
+        position 字段：strategy_id, stock_code, direction, quantity,
+        entry_price, entry_date, current_price, value
+        """
+        with self.get_connection() as conn:
+            conn.execute('''
+                INSERT INTO paper_positions
+                    (strategy_id, stock_code, direction, quantity,
+                     entry_price, entry_date, current_price, value)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(strategy_id, stock_code) DO UPDATE SET
+                    direction=excluded.direction,
+                    quantity=excluded.quantity,
+                    entry_price=excluded.entry_price,
+                    entry_date=excluded.entry_date,
+                    current_price=excluded.current_price,
+                    value=excluded.value,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (
+                position['strategy_id'], position['stock_code'], position['direction'],
+                position['quantity'], position['entry_price'], position['entry_date'],
+                position['current_price'], position['value'],
+            ))
+
+    def delete_paper_position(self, strategy_id: str, stock_code: str) -> None:
+        """删除指定策略的指定股票持仓（平仓后调用）"""
+        with self.get_connection() as conn:
+            conn.execute(
+                'DELETE FROM paper_positions WHERE strategy_id = ? AND stock_code = ?',
+                (strategy_id, stock_code),
+            )
+
+    def insert_paper_order(self, order: Dict) -> int:
+        """
+        插入一条订单记录，返回 order_id。
+
+        order 字段：strategy_id, stock_code, direction, quantity,
+        price_type, reason, status, created_date
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO paper_orders
+                    (strategy_id, stock_code, direction, quantity,
+                     price_type, reason, status, created_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                order['strategy_id'], order['stock_code'], order['direction'],
+                order['quantity'], order['price_type'], order.get('reason', ''),
+                order['status'], order['created_date'],
+            ))
+            return cursor.lastrowid
+
+    def update_paper_order_status(self, order_id: int, status: str) -> None:
+        """更新订单状态（pending / filled / rejected）"""
+        with self.get_connection() as conn:
+            conn.execute(
+                'UPDATE paper_orders SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ?',
+                (status, order_id),
+            )
+
+    def get_pending_orders(self, strategy_id: str) -> List[Dict]:
+        """读取指定策略所有 pending（待次日撮合）订单"""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                'SELECT * FROM paper_orders WHERE strategy_id = ? AND status = ? ORDER BY order_id',
+                (strategy_id, 'pending'),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def insert_paper_trade(self, trade: Dict) -> int:
+        """
+        插入一条成交流水，返回 trade_id。
+
+        trade 字段：order_id, strategy_id, stock_code, direction, quantity,
+        price, amount, commission, slippage, trade_date
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO paper_trades
+                    (order_id, strategy_id, stock_code, direction, quantity,
+                     price, amount, commission, slippage, trade_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                trade.get('order_id'), trade['strategy_id'], trade['stock_code'],
+                trade['direction'], trade['quantity'], trade['price'], trade['amount'],
+                trade['commission'], trade['slippage'], trade['trade_date'],
+            ))
+            return cursor.lastrowid
+
+    def insert_paper_snapshot(self, snapshot: Dict) -> None:
+        """
+        插入（或替换）每日净值快照。
+
+        snapshot 字段：strategy_id, trade_date, cash, position_value,
+        total_value, daily_return, max_drawdown
+        """
+        with self.get_connection() as conn:
+            conn.execute('''
+                INSERT INTO paper_snapshots
+                    (strategy_id, trade_date, cash, position_value,
+                     total_value, daily_return, max_drawdown)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(strategy_id, trade_date) DO UPDATE SET
+                    cash=excluded.cash,
+                    position_value=excluded.position_value,
+                    total_value=excluded.total_value,
+                    daily_return=excluded.daily_return,
+                    max_drawdown=excluded.max_drawdown
+            ''', (
+                snapshot['strategy_id'], snapshot['trade_date'], snapshot['cash'],
+                snapshot['position_value'], snapshot['total_value'],
+                snapshot['daily_return'], snapshot['max_drawdown'],
+            ))
+
+    def get_paper_snapshots(
+        self, strategy_id: str, start_date: str = None, end_date: str = None
+    ) -> List[Dict]:
+        """读取净值快照，可指定日期区间"""
+        with self.get_connection() as conn:
+            if start_date and end_date:
+                rows = conn.execute(
+                    'SELECT * FROM paper_snapshots WHERE strategy_id = ? AND trade_date BETWEEN ? AND ? ORDER BY trade_date',
+                    (strategy_id, start_date, end_date),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    'SELECT * FROM paper_snapshots WHERE strategy_id = ? ORDER BY trade_date',
+                    (strategy_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_paper_trades(
+        self, strategy_id: str, start_date: str = None, end_date: str = None
+    ) -> List[Dict]:
+        """读取成交流水，可指定日期区间"""
+        with self.get_connection() as conn:
+            if start_date and end_date:
+                rows = conn.execute(
+                    'SELECT * FROM paper_trades WHERE strategy_id = ? AND trade_date BETWEEN ? AND ? ORDER BY trade_date',
+                    (strategy_id, start_date, end_date),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    'SELECT * FROM paper_trades WHERE strategy_id = ? ORDER BY trade_date',
+                    (strategy_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_all_paper_accounts(self) -> List[Dict]:
+        """读取全部模拟账户（用于 --status 总览）"""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                'SELECT * FROM paper_accounts ORDER BY strategy_name'
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def reset_paper_trading(self, strategy_id: str = None) -> None:
+        """
+        清空模拟交易历史。
+
+        strategy_id=None 时清空全部策略；否则只清空指定策略。
+        会删除 5 张表中相关数据。
+        """
+        tables = ['paper_snapshots', 'paper_trades', 'paper_orders',
+                  'paper_positions', 'paper_accounts']
+        with self.get_connection() as conn:
+            for table in tables:
+                if strategy_id:
+                    col = 'strategy_id'
+                    conn.execute(f'DELETE FROM {table} WHERE {col} = ?', (strategy_id,))
+                else:
+                    conn.execute(f'DELETE FROM {table}')
+
+    def adjust_paper_cash(self, strategy_id: str, amount: float) -> Optional[Dict]:
+        """
+        手动调整账户可用现金（充值 amount>0 / 提取 amount<0）。
+        返回更新后的账户 dict；账户不存在或提取超额时返回 None。
+        """
+        account = self.get_paper_account(strategy_id)
+        if account is None:
+            return None
+        new_cash = account['cash'] + amount
+        if new_cash < 0:
+            return None  # 提取超额
+        account['cash'] = new_cash
+        account['total_value'] = new_cash + account['frozen_cash'] + (
+            account['total_value'] - account['cash'] - account['frozen_cash']
+        )
+        self.save_paper_account(account)
+        return self.get_paper_account(strategy_id)

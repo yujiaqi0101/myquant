@@ -26,6 +26,7 @@ from .backtest_cli import (
 from .config_cli import setup_config_parser, run_config_command
 from .data_cli import setup_data_parser, run_data_command
 from .factor_cli import setup_factor_parser, run_factor_command
+from .paper_cli import setup_paper_parser, run_paper_subcommand
 
 __all__ = [
     # 回测/策略/结果/股票池
@@ -44,4 +45,7 @@ __all__ = [
     'run_data_command',
     'setup_factor_parser',
     'run_factor_command',
+    # 模拟交易
+    'setup_paper_parser',
+    'run_paper_subcommand',
 ]

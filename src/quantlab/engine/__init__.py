@@ -1,5 +1,7 @@
 from typing import Dict
 
+import pandas as pd
+
 from ..core.portfolio import Portfolio
 from ..core.fill import Fill
 from ..core.tradebook import TradeBook
@@ -158,6 +160,34 @@ class BarEngine(BaseBacktestEngine):
                 .iloc[i - 1]
                 .to_dict()
             )
+
+            # ---- a.5) NaN 信号契约 ----
+            # 策略层约定：全 NaN 表示"不操作，继续持有"
+            # （与 VectorBTAdapter._build_weights_df 保持一致）
+            # 若不加此判断，TopN 用 `v > 0` 过滤会把 NaN 视为不达标
+            # → 返回空 weights → matcher 把所有持仓按 target_w=0 卖光
+            # → 引擎变成"每天清仓、调仓日再买回"的瞎折腾策略
+            valid_scores = [
+                v for v in prev_scores.values()
+                if v is not None
+                and not (
+                    isinstance(v, float)
+                    and pd.isna(v)
+                )
+            ]
+            if not valid_scores:
+                # 全 NaN → 不调仓，只 record 权益，仓位继续持有
+                portfolio.record(
+                    timestamp,
+                    bar_close
+                )
+                for sym in symbols:
+                    position_qty_per_symbol[sym].append(
+                        portfolio
+                        .get_or_create(sym)
+                        .qty
+                    )
+                continue
 
             # ---- b) Portfolio Construction ----
             #     scores -> TargetPortfolio

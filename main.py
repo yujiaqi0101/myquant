@@ -605,6 +605,7 @@ def main():
     from src.cli.factor_cli import setup_factor_parser, run_factor_command
     from src.cli.quantlab_cli import setup_quantlab_parser, run_quantlab_subcommand
     from src.cli.trades_cli import setup_trades_parser, run_trades_command
+    from src.cli.paper_cli import setup_paper_parser, run_paper_subcommand
     
     # config 子命令（配置管理）
     config_parser = subparsers.add_parser('config', help='配置管理（交互式/命令式）')
@@ -640,6 +641,9 @@ def main():
     # trades 子命令（历史交易记录导入与报表生成）
     trades_parser = subparsers.add_parser('trades', help='交易记录管理（导入/验证/报表）')
     setup_trades_parser(trades_parser)
+
+    # paper 子命令（模拟交易）
+    setup_paper_parser(subparsers)
     
     # 原有参数（向后兼容）
     parser.add_argument('--sync', action='store_true', help='仅同步数据（不运行分析）')
@@ -771,6 +775,9 @@ def main():
         return
     elif args.command == 'trades':
         run_trades_command(args)
+        return
+    elif args.command == 'paper':
+        run_paper_subcommand(args)
         return
     
     # 初始化日志

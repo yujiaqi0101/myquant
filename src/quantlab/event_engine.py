@@ -21,6 +21,8 @@ EventEngine 作为"完全解耦"的版本
 
 from typing import Dict, List
 
+import pandas as pd
+
 from .core.portfolio import Portfolio
 from .core.fill import Fill
 from .core.tradebook import TradeBook
@@ -400,10 +402,27 @@ class EventEngine(BaseBacktestEngine):
                     .to_dict()
                 )
 
-                self._build_orders_from_signals(
-                    prev_scores,
-                    first_df.index[i],
-                )
+                # NaN 信号契约：全 NaN 表示"不操作，继续持有"
+                # （与 BarEngine / VectorBTAdapter 保持一致）
+                # 若不加此判断，TopN 会把 NaN 视为不达标 → 返回空 weights
+                # → matcher 把所有持仓按 target_w=0 卖光 → 每天清仓
+                valid_scores = [
+                    v for v in prev_scores.values()
+                    if v is not None
+                    and not (
+                        isinstance(v, float)
+                        and pd.isna(v)
+                    )
+                ]
+                if not valid_scores:
+                    # 全 NaN → 不调仓，仓位继续持有
+                    # 权益 record 和 position_qty 在循环末尾统一处理
+                    pass
+                else:
+                    self._build_orders_from_signals(
+                        prev_scores,
+                        first_df.index[i],
+                    )
 
             # 收尾：每根 bar 收盘记一次权益
             # （与 BarEngine 一致：每根 bar 收完单后 record）
