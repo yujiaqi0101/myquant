@@ -173,18 +173,18 @@ class SimulatedExecution(Execution):
             )
             return
 
-        # 获取账户总资产
+        # 获取账户总资产（Portfolio.get_account 返回 AccountInfo 对象）
         account = self._portfolio.get_account()
-        total = account.get("total", 0.0) if account is not None else 0.0
+        total = account.total if account is not None else 0.0
         # lot_size 按 symbol 判断（688开头200，其他100）
         lot_size = get_lot_size(order.symbol)
         # 目标数量 = floor(总资产 × 权重 / 价格 / lot_size) × lot_size
         raw_qty = total * order.target_weight / current_price / lot_size
         target_qty = math.floor(raw_qty) * lot_size
 
-        # 当前持仓数量
+        # 当前持仓数量（Portfolio.get_position 返回 Position 对象或 None）
         pos = self._portfolio.get_position(order.symbol)
-        current_qty = pos.get("quantity", 0.0) if pos is not None else 0.0
+        current_qty = pos.quantity if pos is not None else 0.0
         # delta = 目标 - 当前
         delta = target_qty - current_qty
 
@@ -226,7 +226,7 @@ class SimulatedExecution(Execution):
         # 卖出校验可用数量（T+1 约束）
         if order.direction is Direction.SELL:
             pos = self._portfolio.get_position(order.symbol)
-            available = pos.get("available", 0.0) if pos is not None else 0.0
+            available = pos.available if pos is not None else 0.0
             if order.volume > available + 1e-9:
                 # 可用不足：拒绝订单
                 order.status = OrderStatus.REJECTED
@@ -244,19 +244,9 @@ class SimulatedExecution(Execution):
         order.filled_volume = order.volume
         order.filled_price = fill_price
 
-        # 调用 Portfolio 更新持仓和现金（阶段4实现）
-        # total_cost 为费用合计，Portfolio 内部根据 direction 计算现金流
-        ret_fill = self._portfolio.update_on_fill(order, fill_price, cost["total_cost"])
-
-        # 构造 Fill 推送 TradeEvent（不依赖 portfolio 返回值，保证事件必发）
-        # 优先用 portfolio 返回的 fill_id，否则本地生成
-        fill_id = ""
-        if ret_fill is not None and getattr(ret_fill, "fill_id", ""):
-            fill_id = ret_fill.fill_id
-        else:
-            fill_id = f"fill_{order.order_id}"
+        # 构造 Fill 对象（含费用明细）
         fill = Fill(
-            fill_id=fill_id,
+            fill_id=f"fill_{order.order_id}",
             order_id=order.order_id,
             symbol=order.symbol,
             direction=order.direction,
@@ -267,6 +257,11 @@ class SimulatedExecution(Execution):
             transfer_fee=cost["transfer_fee"],
             fill_time=current_time,
         )
+        # 调用 Portfolio.apply_fill 更新持仓/现金/FIFO 配对
+        # apply_fill 内部根据 direction 核算现金流并生成 Trade（卖出时）
+        self._portfolio.apply_fill(fill)
+        # 记录订单到 Portfolio 流水
+        self._portfolio.record_order(order)
         # 推送成交回报事件
         self._emit_trade_event(fill, current_time)
         # 推送订单成交事件

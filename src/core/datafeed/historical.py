@@ -238,8 +238,12 @@ class HistoricalDataFeed(DataFeed):
         # 尚未开始推送（游标为 -1）：返回空，避免未来函数
         if self._current_idx < 0:
             return pd.DataFrame()
+        # 游标越界（回测已结束）：用最后一个交易日作为截止日
+        if self._current_idx >= len(self._dates):
+            current_date = self._dates[-1]
+        else:
+            current_date = self._dates[self._current_idx]
         # 截止当前交易日（含）的数据切片
-        current_date = self._dates[self._current_idx]
         sub = sym_df[sym_df.index <= current_date].tail(count)
         # 按需过滤字段
         if fields:

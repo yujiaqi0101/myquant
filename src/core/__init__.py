@@ -12,6 +12,7 @@ src/core/__init__.py
     - 阶段2：datafeed/execution（数据流与执行层抽象）
     - 阶段3：risk + risk_checks（风控管线）
     - 阶段4：portfolio/result/persistence（持仓管理与持久化）
+    - 阶段5：engine（Backtest/Paper/Live 三种引擎）
 
 模块清单：
     - types.py          统一数据结构（Order/Fill/Trade/Position + 4个枚举）
@@ -22,6 +23,7 @@ src/core/__init__.py
     - portfolio.py      Portfolio 持仓管理状态机（现金/持仓/成交/FIFO配对）
     - result.py         BacktestResult + 22项绩效指标 + BenchmarkProvider
     - persistence/      模拟盘/实盘持久化（account_* 5张表）
+    - engine/           三种引擎（Backtest/Paper/Live）+ 对应 Context
 
 为避免循环导入，本 __init__.py 只做轻量导出，需要时直接从子模块导入。
 """
@@ -66,6 +68,15 @@ from src.core.result import (
     PerformanceCalculator,
 )
 from src.core.persistence import PersistenceRepository
+# 阶段5：三种引擎
+from src.core.engine import (
+    BacktestContext,
+    BacktestEngine,
+    LiveContext,
+    LiveEngine,
+    PaperContext,
+    PaperEngine,
+)
 
 __all__ = [
     # types
@@ -104,4 +115,11 @@ __all__ = [
     "BenchmarkProvider",
     "PerformanceCalculator",
     "PersistenceRepository",
+    # engine
+    "BacktestContext",
+    "BacktestEngine",
+    "PaperContext",
+    "PaperEngine",
+    "LiveContext",
+    "LiveEngine",
 ]
