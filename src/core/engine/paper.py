@@ -11,12 +11,18 @@ PaperEngine 模拟盘引擎 + PaperContext 策略上下文。
     3. 支持跨日 Pending 订单（T+1 次日开盘撮合）
     4. 异步事件循环（EventEngine mode="paper"）
 
+多策略子账户模式：
+    - 一个主账户可同时运行多个策略，每个策略对应一个子账户
+    - PaperEngine 通过 strategy_name 参数标识当前运行的子账户
+    - 持久化时所有数据（持仓/订单/成交/快照）都带 strategy_name 标签
+    - 资金隔离：每个子账户独立 Portfolio，主账户资金通过 account_strategies 管理
+
 运行模式（设计文档 7.2 节）：
     - 长驻模式：run() 启动后持续运行，由 LiveDataFeed 后台线程推 bar
     - 每日模式：run_one_day(trade_date) 处理单个交易日（适合 A 股日频调仓）
 
 生命周期：
-    1. load_state() 从 DB 恢复账户状态（首次运行初始化）
+    1. load_state() 从 DB 恢复子账户状态（首次运行初始化）
     2. 策略 on_init
     3. 每个交易日：
        a. 接收当日 bar（LiveDataFeed 推送或从 DB 读取）
@@ -26,11 +32,19 @@ PaperEngine 模拟盘引擎 + PaperContext 策略上下文。
        e. save_state(trade_date) 持久化
     4. 策略 on_stop
 
-用法示例：
+用法示例（多策略子账户）：
     from src.core.engine import PaperEngine
-    engine = PaperEngine(strategy=s, db=db, account_id="acc_001", initial_capital=1e6)
+
+    # 主账户 acc_001 下运行策略 small_cap，分配 50 万资金
+    engine = PaperEngine(
+        strategy=s,
+        db=db,
+        account_id="acc_001",
+        strategy_name="small_cap",  # 子账户标识
+        initial_capital=500_000,
+    )
     engine.start()
-    engine.run_one_day("2024-06-28")  # 处理单日
+    engine.run_one_day(bar)  # 处理单日
     engine.stop()
 """
 
@@ -160,8 +174,10 @@ class PaperContext(Context):
                 )
             )
             self._engine.portfolio.record_order(order)
-            # 持久化订单
-            self._engine.repository.save_order(self._engine.account_id, order)
+            # 持久化订单（带 strategy_name 标识子账户）
+            self._engine.repository.save_order(
+                self._engine.account_id, order, self._engine.strategy_name
+            )
             return order_id
         # 风控检查
         if self._engine.risk_manager is not None:
@@ -181,12 +197,16 @@ class PaperContext(Context):
                     )
                 )
                 self._engine.portfolio.record_order(order)
-                self._engine.repository.save_order(self._engine.account_id, order)
+                self._engine.repository.save_order(
+                    self._engine.account_id, order, self._engine.strategy_name
+                )
                 return order_id
         # 提交撮合
         self._engine.execution.submit(order, current_price, self._engine.clock)
-        # 持久化订单和成交
-        self._engine.repository.save_order(self._engine.account_id, order)
+        # 持久化订单（带 strategy_name 标识子账户）
+        self._engine.repository.save_order(
+            self._engine.account_id, order, self._engine.strategy_name
+        )
         return order_id
 
     def cancel_order(self, order_id: str) -> bool:
@@ -242,6 +262,11 @@ class PaperEngine:
     组装 LiveDataFeed + SimulatedExecution(paper) + RiskManager + Portfolio +
     PersistenceRepository，支持跨日恢复运行。
 
+    多策略子账户模式：
+        一个主账户（account_id）可同时运行多个策略，每个策略对应一个子账户
+        （strategy_name）。PaperEngine 实例代表一个子账户的运行，资金独立隔离。
+        主账户的资金通过 PersistenceRepository.init_main_account/add_strategy 管理。
+
     Parameters
     ----------
     strategy : Strategy
@@ -249,9 +274,12 @@ class PaperEngine:
     db : DatabaseManager
         数据库管理器
     account_id : str
-        账户ID（持久化主键，每个模拟盘账户唯一）
+        主账户ID（持久化主键，每个模拟盘账户唯一）
+    strategy_name : str, optional
+        子账户策略名称（多策略模式下标识当前子账户）。
+        None 时回退到 strategy.name（向后兼容）
     initial_capital : float
-        初始资金（首次运行时使用，后续从 DB 恢复）
+        子账户初始资金（首次运行时使用，后续从 DB 恢复）
     datafeed : LiveDataFeed, optional
         实时数据流，None 时降级为从 DB 读取
     risk_manager : RiskManager, optional
@@ -265,6 +293,7 @@ class PaperEngine:
         strategy: Strategy,
         db: Any,
         account_id: str,
+        strategy_name: Optional[str] = None,
         initial_capital: float = 1_000_000.0,
         datafeed: Optional[Any] = None,
         risk_manager: Optional[RiskManager] = None,
@@ -273,6 +302,8 @@ class PaperEngine:
         self.strategy: Strategy = strategy
         self.db: Any = db
         self.account_id: str = account_id
+        # 子账户策略名称：未指定时回退到 strategy.name（兼容旧调用）
+        self.strategy_name: str = strategy_name if strategy_name else strategy.name
         self.config: Dict[str, Any] = dict(config) if config else {}
         self.config.setdefault("initial_capital", initial_capital)
 
@@ -354,7 +385,7 @@ class PaperEngine:
         self._started = True
         logger.info(
             "PaperEngine 启动: account=%s strategy=%s",
-            self.account_id, self.strategy.name,
+            self.account_id, self.strategy_name,
         )
 
     def stop(self) -> None:
@@ -374,7 +405,10 @@ class PaperEngine:
         # 持久化最终状态
         self.save_state(self._clock.strftime("%Y-%m-%d"))
         self._started = False
-        logger.info("PaperEngine 已停止: account=%s", self.account_id)
+        logger.info(
+            "PaperEngine 已停止: account=%s strategy=%s",
+            self.account_id, self.strategy_name,
+        )
 
     # ------------------------------------------------------------------
     # 单日运行（A股日频调仓核心）
@@ -491,20 +525,22 @@ class PaperEngine:
     # ------------------------------------------------------------------
 
     def load_state(self) -> bool:
-        """从 DB 恢复账户状态。"""
-        ok = self.repository.load_account_state(self.account_id, self.portfolio)
+        """从 DB 恢复子账户状态（按 strategy_name 隔离）。"""
+        ok = self.repository.load_account_state(
+            self.account_id, self.strategy_name, self.portfolio
+        )
         if ok:
             logger.info(
-                "PaperEngine 恢复账户: account=%s cash=%.2f positions=%d",
-                self.account_id, self.portfolio.cash,
+                "PaperEngine 恢复子账户: account=%s strategy=%s cash=%.2f positions=%d",
+                self.account_id, self.strategy_name, self.portfolio.cash,
                 len(self.portfolio.get_active_positions()),
             )
         return ok
 
     def save_state(self, trade_date: str) -> None:
-        """持久化账户状态到 DB。"""
+        """持久化子账户状态到 DB（按 strategy_name 隔离）。"""
         self.repository.save_account_state(
-            self.account_id, self.strategy.name, self.portfolio, trade_date
+            self.account_id, self.strategy_name, self.portfolio, trade_date
         )
 
     # ------------------------------------------------------------------
