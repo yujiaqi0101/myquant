@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS account_strategies (
     cash              DOUBLE NOT NULL,
     total_value       DOUBLE NOT NULL,
     enabled           INTEGER NOT NULL DEFAULT 1,
+    last_trade_date   TEXT,
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (account_id, strategy_name)
@@ -168,6 +169,7 @@ _ALTER_COLUMNS = [
     ("account_orders", "strategy_name", "VARCHAR(100) NOT NULL DEFAULT ''"),
     ("account_fills", "strategy_name", "VARCHAR(100) NOT NULL DEFAULT ''"),
     ("account_snapshots", "strategy_name", "VARCHAR(100) NOT NULL DEFAULT ''"),
+    ("account_strategies", "last_trade_date", "TEXT"),
 ]
 
 
@@ -577,20 +579,20 @@ class PersistenceRepository:
     def list_strategies(
         self,
         account_id: str,
-        only_enabled: bool = False,
+        enabled_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """列出主账户下的全部子账户。
 
         Args:
             account_id: 主账户ID
-            only_enabled: True 仅返回启用的子账户
+            enabled_only: True 仅返回启用的子账户
 
         Returns:
             子账户列表，每项含 strategy_name/allocated_capital/cash/total_value/enabled
         """
         self.ensure_tables()
         with self.db.get_connection() as conn:
-            if only_enabled:
+            if enabled_only:
                 rows = conn.execute(
                     """
                     SELECT * FROM account_strategies
@@ -633,6 +635,7 @@ class PersistenceRepository:
         strategy_name: str,
         cash: float,
         total_value: float,
+        trade_date: Optional[str] = None,
     ) -> None:
         """更新子账户资金状态（模拟盘每日运行后调用）。
 
@@ -641,17 +644,28 @@ class PersistenceRepository:
             strategy_name: 策略名称
             cash: 子账户当前现金
             total_value: 子账户当前总资产
+            trade_date: 当日交易日（YYYY-MM-DD），写入 last_trade_date 便于补记录
         """
         self.ensure_tables()
         with self.db.get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE account_strategies
-                SET cash = ?, total_value = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE account_id = ? AND strategy_name = ?
-                """,
-                (cash, total_value, account_id, strategy_name),
-            )
+            if trade_date is not None:
+                conn.execute(
+                    """
+                    UPDATE account_strategies
+                    SET cash = ?, total_value = ?, last_trade_date = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE account_id = ? AND strategy_name = ?
+                    """,
+                    (cash, total_value, trade_date, account_id, strategy_name),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE account_strategies
+                    SET cash = ?, total_value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE account_id = ? AND strategy_name = ?
+                    """,
+                    (cash, total_value, account_id, strategy_name),
+                )
 
     # ------------------------------------------------------------------
     # 账户信息（旧接口，保留兼容；多策略模式下主账户用 init_main_account/deposit/withdraw）
@@ -1069,7 +1083,7 @@ class PersistenceRepository:
             }
             self.save_snapshot(account_id, trade_date, snapshot, strategy_name)
         # 更新子账户资金状态
-        self.update_strategy_state(account_id, strategy_name, acct.cash, acct.total)
+        self.update_strategy_state(account_id, strategy_name, acct.cash, acct.total, trade_date)
 
     def load_account_state(
         self,

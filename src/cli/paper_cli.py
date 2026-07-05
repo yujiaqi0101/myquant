@@ -52,12 +52,38 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 def _get_db_path() -> str:
     """获取数据库路径。"""
     return str(Path(__file__).parent.parent.parent / "data" / "aquant.db")
+
+
+def _parse_strategy_params(param_list) -> Dict[str, Any]:
+    """解析 --param KEY=VALUE 列表为字典。
+
+    自动尝试将值转为 int/float/bool，失败则保留字符串。
+    """
+    params: Dict[str, Any] = {}
+    for item in param_list:
+        if "=" not in item:
+            continue
+        key, raw_value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        try:
+            if "." in raw_value:
+                params[key] = float(raw_value)
+            else:
+                params[key] = int(raw_value)
+        except ValueError:
+            if raw_value.lower() in ("true", "false"):
+                params[key] = raw_value.lower() == "true"
+            else:
+                params[key] = raw_value
+    return params
 
 
 def setup_paper_parser(subparsers) -> None:
@@ -118,6 +144,28 @@ def setup_paper_parser(subparsers) -> None:
     p_run.add_argument("--no-risk-check", action="store_true", help="禁用 A 股风控")
     p_run.add_argument("--auto-create", action="store_true",
                        help="子账户不存在时自动创建（需指定 --strategy 和 --initial-capital）")
+    p_run.add_argument(
+        "--param",
+        action="append",
+        metavar="KEY=VALUE",
+        default=[],
+        help="策略参数，可多次指定，如 --param symbol=600519.SH --param action=buy",
+    )
+
+    p_rr = sub.add_parser("run-range", help="批量执行区间内每日模拟交易")
+    p_rr.add_argument("--account", required=True, help="主账户ID")
+    p_rr.add_argument("--strategy", default=None,
+                      help="子账户策略名（省略时运行该账户下所有启用的子账户）")
+    p_rr.add_argument("--start-date", required=True, help="起始日期 YYYY-MM-DD")
+    p_rr.add_argument("--end-date", required=True, help="结束日期 YYYY-MM-DD") 
+    p_rr.add_argument("--no-risk-check", action="store_true", help="禁用 A 股风控")
+    p_rr.add_argument(
+        "--param",
+        action="append",
+        metavar="KEY=VALUE",
+        default=[],
+        help="策略参数，可多次指定，如 --param symbol=600519.SH --param action=buy",
+    )
 
     p_status = sub.add_parser("status", help="查看账户状态")
     p_status.add_argument("--account", default=None, help="主账户ID（不指定则显示全部）")
@@ -125,6 +173,13 @@ def setup_paper_parser(subparsers) -> None:
     p_pos = sub.add_parser("positions", help="查看持仓明细")
     p_pos.add_argument("--account", required=True, help="主账户ID")
     p_pos.add_argument("--strategy", default=None, help="仅查看指定子账户（不指定则合并全部子账户）")
+
+    p_trades = sub.add_parser("trades", help="查看成交记录")
+    p_trades.add_argument("--account", required=True, help="主账户ID")
+    p_trades.add_argument("--strategy", default=None, help="仅查看指定子账户（不指定则显示全部）")
+    p_trades.add_argument("--start-date", default=None, help="起始日期 YYYY-MM-DD")
+    p_trades.add_argument("--end-date", default=None, help="结束日期 YYYY-MM-DD")
+    p_trades.add_argument("--limit", type=int, default=200, help="最多显示条数（默认 200）")
 
     p_reset = sub.add_parser("reset", help="重置子账户（清空历史，资金回到初始）")
     p_reset.add_argument("--account", required=True, help="主账户ID")
@@ -159,8 +214,10 @@ def run_paper_subcommand(args: argparse.Namespace) -> None:
         "list-strategies": _run_list_strategies,
         # 运行与查询
         "run": _run_run,
+        "run-range": _run_run_range,
         "status": _run_status,
         "positions": _run_positions,
+        "trades": _run_trades,
         "reset": _run_reset,
         "adjust-cash": _run_adjust_cash,
     }
@@ -357,7 +414,7 @@ def _run_list_strategies(args: argparse.Namespace) -> None:
         print(f"错误：主账户 '{args.account}' 不存在")
         return
 
-    strategies = repo.list_strategies(args.account, only_enabled=not args.all)
+    strategies = repo.list_strategies(args.account, enabled_only=not args.all)
 
     print(f"\n主账户: {args.account}")
     print(f"  初始资金: {main['initial_capital']:,.2f}")
@@ -415,6 +472,7 @@ def _run_run(args: argparse.Namespace) -> None:
     trade_date = args.date or datetime.now().strftime("%Y-%m-%d")
 
     # 3. 分发：指定策略 → 单策略运行；省略 → 遍历所有启用子账户
+    strategy_params = _parse_strategy_params(args.param)
     if args.strategy is not None:
         # 单策略模式
         ok = _run_single_strategy(
@@ -422,6 +480,7 @@ def _run_run(args: argparse.Namespace) -> None:
             no_risk_check=args.no_risk_check,
             auto_create=args.auto_create,
             initial_capital=args.initial_capital,
+            strategy_params=strategy_params,
         )
         if not ok and args.auto_create:
             # _run_single_strategy 内部已处理自动创建，这里不需要额外动作
@@ -444,6 +503,7 @@ def _run_run(args: argparse.Namespace) -> None:
             repo, db, args.account, sname, trade_date,
             no_risk_check=args.no_risk_check,
             auto_create=False,  # 多策略模式不自动创建
+            strategy_params=strategy_params,
             initial_capital=args.initial_capital,
         )
         # 读取运行后状态用于汇总
@@ -476,6 +536,96 @@ def _run_run(args: argparse.Namespace) -> None:
     print(f"  主账户总资产:       {main['cash'] + total_value:,.2f}")
 
 
+def _run_run_range(args: argparse.Namespace) -> None:
+    """批量执行区间内每日模拟交易。
+
+    从 t_trading_date 读取 [start_date, end_date] 内的交易日，
+    逐日调用 _run_single_strategy（单策略或多策略）。
+    """
+    import src.strategies  # noqa: F401 触发 auto_discover
+    from src.core.persistence import PersistenceRepository
+    from src.data.database import DatabaseManager
+
+    db = DatabaseManager(_get_db_path())
+    repo = PersistenceRepository(db)
+
+    # 1. 主账户存在性检查
+    main = repo.get_main_account(args.account)
+    if main is None:
+        print(f"错误：主账户 '{args.account}' 不存在")
+        return
+
+    # 2. 从 t_trading_date 获取区间内交易日
+    with db.get_connection() as conn:
+        rows = conn.execute(
+            "SELECT trade_date FROM t_trading_date WHERE trade_date >= ? AND trade_date <= ? ORDER BY trade_date",
+            (args.start_date, args.end_date),
+        ).fetchall()
+    trade_dates = [r[0] for r in rows]
+
+    if not trade_dates:
+        print(f"错误：区间 [{args.start_date}, {args.end_date}] 内无交易日")
+        return
+
+    # 3. 确定子账户列表
+    strategy_params = _parse_strategy_params(args.param)
+    if args.strategy is not None:
+        strategies = [{"strategy_name": args.strategy}]
+    else:
+        strategies = repo.list_strategies(args.account, enabled_only=True)
+        if not strategies:
+            print(f"错误：主账户 '{args.account}' 下没有启用的子账户")
+            return
+
+    print(f"\n=== 批量运行 [{args.account}] {len(strategies)} 个子账户 ===")
+    print(f"区间: {args.start_date} ~ {args.end_date}  共 {len(trade_dates)} 个交易日")
+    print("=" * 80)
+
+    total_ok = 0
+    total_fail = 0
+    for i, trade_date in enumerate(trade_dates, 1):
+        print(f"\n[{i}/{len(trade_dates)}] 交易日 {trade_date}")
+        day_ok = 0
+        day_fail = 0
+        for strat in strategies:
+            sname = strat["strategy_name"]
+            ok = _run_single_strategy(
+                repo, db, args.account, sname, trade_date,
+                no_risk_check=args.no_risk_check,
+                auto_create=False,
+                strategy_params=strategy_params,
+            )
+            if ok:
+                day_ok += 1
+            else:
+                day_fail += 1
+        total_ok += day_ok
+        total_fail += day_fail
+        # 每日运行后输出当日简要汇总
+        print(f"  当日结果: 成功 {day_ok} 个, 失败 {day_fail} 个")
+
+    # 4. 总汇总
+    print(f"\n=== 批量运行完成 ===")
+    print(f"区间: {args.start_date} ~ {args.end_date}")
+    print(f"交易日数: {len(trade_dates)}")
+    print(f"总成功: {total_ok}  总失败: {total_fail}")
+
+    # 5. 输出最终账户状态
+    print(f"\n=== 最终账户状态 ===")
+    updated_main = repo.get_main_account(args.account)
+    if updated_main:
+        print(f"主账户现金: {updated_main['cash']:,.2f}  总资产: {updated_main['total_value']:,.2f}")
+    final_strats = repo.list_strategies(args.account, enabled_only=False)
+    for s in final_strats:
+        pnl = s["total_value"] - s["allocated_capital"]
+        pnl_pct = pnl / s["allocated_capital"] if s["allocated_capital"] > 0 else 0.0
+        last_date = s.get("last_trade_date") or "-"
+        print(
+            f"  {s['strategy_name']:<20} 现金={s['cash']:>12.2f} 总资产={s['total_value']:>12.2f} "
+            f"盈亏={pnl:>+12.2f} ({pnl_pct:>+7.2%}) 末交易日={last_date}"
+        )
+
+
 def _run_single_strategy(
     repo,
     db,
@@ -485,6 +635,7 @@ def _run_single_strategy(
     no_risk_check: bool = False,
     auto_create: bool = False,
     initial_capital: float = 1_000_000.0,
+    strategy_params: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """运行单个子账户的单日模拟交易。
 
@@ -497,6 +648,7 @@ def _run_single_strategy(
         no_risk_check: 是否禁用风控
         auto_create: 子账户不存在时是否自动创建
         initial_capital: auto_create 时的初始资金
+        strategy_params: 策略参数字典（如 manual_trade 的 symbol/action/volume）
 
     Returns:
         True 表示运行成功，False 表示失败
@@ -540,7 +692,7 @@ def _run_single_strategy(
         risk_manager = build_ashare_risk_manager()
 
     # 4. 实例化策略
-    strategy = strategy_class(params={})
+    strategy = strategy_class(params=strategy_params or {})
 
     # 5. 构造 PaperEngine（每日模式 datafeed=None）
     #    使用子账户的实际分配资金作为 initial_capital（首次运行后从 DB 恢复）
@@ -625,7 +777,7 @@ def _print_account_detail(repo, main: dict) -> None:
     print(f"  已分配:   {main['allocated_capital']:,.2f}  可用: {main['available_capital']:,.2f}")
     print(f"  总资产:   {main['total_value']:,.2f}  峰值: {main['peak_value']:,.2f}")
 
-    strategies = repo.list_strategies(main["account_id"], only_enabled=False)
+    strategies = repo.list_strategies(main["account_id"], enabled_only=False)
     if not strategies:
         print("  暂无子账户")
     else:
@@ -634,10 +786,11 @@ def _print_account_detail(repo, main: dict) -> None:
             status = "启用" if s["enabled"] else "停用"
             pnl = s["total_value"] - s["allocated_capital"]
             pnl_pct = pnl / s["allocated_capital"] if s["allocated_capital"] > 0 else 0.0
+            last_date = s.get("last_trade_date") or "-"
             print(
                 f"    - {s['strategy_name']:<20} "
                 f"分配={s['allocated_capital']:>12.2f} 总资产={s['total_value']:>12.2f} "
-                f"盈亏={pnl:>+12.2f} ({pnl_pct:>+7.2%}) [{status}]"
+                f"盈亏={pnl:>+12.2f} ({pnl_pct:>+7.2%}) 末交易日={last_date} [{status}]"
             )
     print("=" * 110)
 
@@ -681,6 +834,57 @@ def _run_positions(args: argparse.Namespace) -> None:
             f"{pos.market_price:>12.2f} {pos.market_value:>14.2f} {pos.pnl:>+14.2f}"
         )
     print("=" * 110)
+
+
+def _run_trades(args: argparse.Namespace) -> None:
+    """查看成交记录。"""
+    from src.core.persistence import PersistenceRepository
+    from src.data.database import DatabaseManager
+
+    db = DatabaseManager(_get_db_path())
+    repo = PersistenceRepository(db)
+
+    # 加载全部成交（按 strategy 过滤或不指定）
+    fills = repo.load_fills(args.account, args.strategy)
+
+    # 按日期范围过滤
+    if args.start_date:
+        fills = [f for f in fills if (f.get("fill_time") or "") >= args.start_date]
+    if args.end_date:
+        fills = [f for f in fills if (f.get("fill_time") or "") <= args.end_date + " 23:59:59"]
+
+    # 限制条数
+    total = len(fills)
+    if total > args.limit:
+        fills = fills[-args.limit:]  # 显示最后 N 条（最近记录）
+        print(f"共 {total} 条成交记录，仅显示最后 {args.limit} 条")
+
+    if not fills:
+        print(f"\n账户: {args.account}  无成交记录")
+        return
+
+    scope = args.strategy if args.strategy else "全部子账户"
+    print(f"\n账户: {args.account}  子账户: {scope}  成交记录 ({len(fills)} 条)")
+    print("=" * 130)
+    print(
+        f"{'成交时间':<20} {'子账户':<16} {'股票代码':<12} {'方向':<6} "
+        f"{'成交价':>12} {'成交量':>12} {'成交额':>14} {'佣金':>10} {'印花税':>10}"
+    )
+    print("-" * 130)
+    for f in fills:
+        direction = "买入" if f.get("direction") == "buy" else "卖出"
+        price = f.get("price", 0.0)
+        volume = f.get("volume", 0.0)
+        amount = price * volume
+        print(
+            f"{f.get('fill_time', '-'):<20} "
+            f"{f.get('strategy_name', '-'):<16} "
+            f"{f.get('symbol', '-'):<12} "
+            f"{direction:<6} "
+            f"{price:>12.2f} {volume:>12.0f} {amount:>14.2f} "
+            f"{f.get('commission', 0.0):>10.2f} {f.get('stamp_tax', 0.0):>10.2f}"
+        )
+    print("=" * 130)
 
 
 def _run_reset(args: argparse.Namespace) -> None:
@@ -756,6 +960,9 @@ def _load_daily_bar(db, trade_date: str) -> Optional[object]:
     df = db.get_stock_daily(start_date=trade_date, end_date=trade_date)
     if df.empty:
         return None
+
+    # get_stock_daily 返回的 df 是以 (trade_date, stock_code) 为 MultiIndex 的
+    df = df.reset_index()
 
     # 构造 symbols_bars: {symbol: {open/high/low/close/volume}}
     symbols_bars = {}

@@ -1618,7 +1618,7 @@ class DataSynchronizer:
         self._log_sync('financial_data', start_time, datetime.now(), record_count, status,
                        details=f'记录 {record_count}, 失败 {error_count} 天')
         # 刷新 t_sync_data_log，记录当前 t_finance_prime 已有的日期
-        self._refresh_sync_data_log('t_finance_prime', 'rpt_date')
+        self._refresh_sync_data_log('t_finance_prime', 'pub_date')
         return {'count': record_count, 'stock_count': total, 'error_count': error_count, 'status': status}
 
     def sync_finance_deriv_data(self, stock_list, start_date, end_date, progress_callback=None) -> dict:
@@ -1700,7 +1700,7 @@ class DataSynchronizer:
         self._log_sync('finance_deriv_data', start_time, datetime.now(), record_count, status,
                        details=f'记录 {record_count}, 失败 {error_count} 天')
         # 刷新 t_sync_data_log，记录当前 t_finance_deriv 已有的日期
-        self._refresh_sync_data_log('t_finance_deriv', 'rpt_date')
+        self._refresh_sync_data_log('t_finance_deriv', 'pub_date')
         return {'count': record_count, 'stock_count': total, 'error_count': error_count, 'status': status}
 
     def sync_stock_mktvalue(self, stock_list, start_date: str, end_date: str) -> dict:

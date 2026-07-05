@@ -313,12 +313,12 @@ class TestStrategySubAccount:
         repo.disable_strategy("acc_001", "s2")
 
         # 默认仅启用
-        enabled = repo.list_strategies("acc_001", only_enabled=True)
+        enabled = repo.list_strategies("acc_001", enabled_only=True)
         assert len(enabled) == 1
         assert enabled[0]["strategy_name"] == "s1"
 
         # 全部
-        all_strats = repo.list_strategies("acc_001", only_enabled=False)
+        all_strats = repo.list_strategies("acc_001", enabled_only=False)
         assert len(all_strats) == 2
 
     def test_remove_strategy_recovers_capital(self, repo):
